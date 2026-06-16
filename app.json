@@ -10,7 +10,8 @@
       "supportsTablet": false,
       "infoPlist": {
         "NSMicrophoneUsageDescription": "This app uses the microphone to send voice messages over the walkie-talkie channel."
-      }
+      },
+      "bundleIdentifier": "com.anonymous.carehomewalkiemobile"
     },
     "android": {
       "adaptiveIcon": {
@@ -23,7 +24,8 @@
       "permissions": [
         "android.permission.RECORD_AUDIO",
         "android.permission.MODIFY_AUDIO_SETTINGS"
-      ]
+      ],
+      "package": "com.anonymous.carehomewalkiemobile"
     },
     "web": {
       "favicon": "./assets/favicon.png"
