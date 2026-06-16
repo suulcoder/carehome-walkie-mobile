@@ -6,7 +6,7 @@ import {
   SafeAreaView,
   StatusBar,
   Alert,
-  ToastAndroid,
+  Animated,
   Platform,
 } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
@@ -15,7 +15,7 @@ import { nanoid } from "nanoid/non-secure";
 
 import { WsClient, ConnectionState } from "./src/network/wsClient";
 import { ServerMessage, PeerInfo } from "./src/network/protocol";
-import { startCapture, stopCapture } from "./src/audio/capture";
+import { requestMicPermission, startCapture, stopCapture } from "./src/audio/capture";
 import { initPlayback, receiveChunk, endSession } from "./src/audio/playback";
 import { ConnectionBanner } from "./src/ui/ConnectionBanner";
 import { PTTButton } from "./src/ui/PTTButton";
@@ -24,10 +24,33 @@ import { NameModal } from "./src/ui/NameModal";
 
 const NAME_KEY = "display_name";
 
-function showToast(msg: string) {
-  if (Platform.OS === "android") {
-    ToastAndroid.show(msg, ToastAndroid.SHORT);
-  }
+// ─── Cross-platform in-app toast ─────────────────────────────────────────────
+function useToast() {
+  const [message, setMessage] = useState<string | null>(null);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const opacity = useRef(new Animated.Value(0)).current;
+
+  const show = useCallback(
+    (msg: string) => {
+      if (timerRef.current) clearTimeout(timerRef.current);
+      setMessage(msg);
+      Animated.sequence([
+        Animated.timing(opacity, { toValue: 1, duration: 180, useNativeDriver: true }),
+        Animated.delay(1800),
+        Animated.timing(opacity, { toValue: 0, duration: 280, useNativeDriver: true }),
+      ]).start();
+      timerRef.current = setTimeout(() => setMessage(null), 2300);
+    },
+    [opacity]
+  );
+
+  const ToastView = message ? (
+    <Animated.View style={[styles.toast, { opacity }]}>
+      <Text style={styles.toastText}>{message}</Text>
+    </Animated.View>
+  ) : null;
+
+  return { show, ToastView };
 }
 
 export default function App() {
@@ -41,8 +64,9 @@ export default function App() {
 
   const wsRef = useRef<WsClient | null>(null);
   const activePttSession = useRef<string | null>(null);
+  const { show: showToast, ToastView } = useToast();
 
-  // Load persisted name on mount
+  // Load persisted name + initialise audio on mount
   useEffect(() => {
     AsyncStorage.getItem(NAME_KEY).then((name) => {
       if (name) {
@@ -51,7 +75,18 @@ export default function App() {
         setShowNameModal(true);
       }
     });
+
     initPlayback().catch(console.error);
+
+    // Request mic permission upfront on both platforms
+    requestMicPermission().then((granted) => {
+      if (!granted) {
+        Alert.alert(
+          "Microphone permission required",
+          "Please allow microphone access in Settings to use the walkie-talkie."
+        );
+      }
+    });
   }, []);
 
   // Connect WebSocket when name is set
@@ -77,29 +112,32 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [displayName]);
 
-  const handleServerMessage = useCallback((msg: ServerMessage) => {
-    switch (msg.type) {
-      case "peer_joined":
-        setPeers((prev) => [...prev.filter((p) => p.id !== msg.peer.id), msg.peer]);
-        showToast(`${msg.peer.name} joined`);
-        break;
-      case "peer_left":
-        setPeers((prev) => prev.filter((p) => p.id !== msg.peerId));
-        setActiveSpeaker((prev) => (prev === msg.peerId ? null : prev));
-        break;
-      case "ptt_start":
-        setActiveSpeaker(msg.from.id);
-        showToast(`${msg.from.name} is speaking`);
-        break;
-      case "audio_chunk":
-        receiveChunk(msg.sessionId, msg.seq, msg.pcmBase64).catch(() => {});
-        break;
-      case "ptt_end":
-        endSession(msg.sessionId);
-        setActiveSpeaker((prev) => (prev === msg.from.id ? null : prev));
-        break;
-    }
-  }, []);
+  const handleServerMessage = useCallback(
+    (msg: ServerMessage) => {
+      switch (msg.type) {
+        case "peer_joined":
+          setPeers((prev) => [...prev.filter((p) => p.id !== msg.peer.id), msg.peer]);
+          showToast(`${msg.peer.name} joined`);
+          break;
+        case "peer_left":
+          setPeers((prev) => prev.filter((p) => p.id !== msg.peerId));
+          setActiveSpeaker((prev) => (prev === msg.peerId ? null : prev));
+          break;
+        case "ptt_start":
+          setActiveSpeaker(msg.from.id);
+          showToast(`${msg.from.name} is speaking`);
+          break;
+        case "audio_chunk":
+          receiveChunk(msg.sessionId, msg.seq, msg.pcmBase64).catch(() => {});
+          break;
+        case "ptt_end":
+          endSession(msg.sessionId);
+          setActiveSpeaker((prev) => (prev === msg.from.id ? null : prev));
+          break;
+      }
+    },
+    [showToast]
+  );
 
   const handleNameSubmit = async (name: string) => {
     await AsyncStorage.setItem(NAME_KEY, name);
@@ -145,7 +183,11 @@ export default function App() {
 
   return (
     <SafeAreaView style={styles.root}>
-      <StatusBar barStyle="dark-content" backgroundColor="#f9fafb" />
+      <StatusBar
+        barStyle="dark-content"
+        // backgroundColor is Android-only; iOS ignores it (handled by SafeAreaView)
+        backgroundColor="#f9fafb"
+      />
 
       <ConnectionBanner state={connState} queuedCount={queuedCount} />
 
@@ -169,6 +211,9 @@ export default function App() {
           </Text>
         )}
       </View>
+
+      {/* Cross-platform in-app toast — works on Android and iOS */}
+      {ToastView}
 
       <NameModal visible={showNameModal} onSubmit={handleNameSubmit} />
     </SafeAreaView>
@@ -210,5 +255,20 @@ const styles = StyleSheet.create({
     textAlign: "center",
     paddingHorizontal: 40,
     marginTop: 12,
+  },
+  toast: {
+    position: "absolute",
+    bottom: Platform.OS === "ios" ? 48 : 32,
+    alignSelf: "center",
+    backgroundColor: "rgba(17,24,39,0.85)",
+    paddingHorizontal: 20,
+    paddingVertical: 10,
+    borderRadius: 24,
+    maxWidth: "80%",
+  },
+  toastText: {
+    color: "#fff",
+    fontSize: 13,
+    textAlign: "center",
   },
 });

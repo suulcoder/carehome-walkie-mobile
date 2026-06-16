@@ -1,36 +1,33 @@
 /**
- * Jitter-buffered audio playback using @mykin-ai/expo-audio-stream Pipeline.
+ * Audio playback wrapper using @mykin-ai/expo-audio-stream buffered API.
  *
- * Buffers incoming chunks by (sessionId, seq) to handle out-of-order delivery,
- * then drains them to the native audio pipeline in sequence.
+ * Works on both iOS and Android.
+ * Uses the native jitter-buffer (startBufferedAudioStream / playAudioBuffered)
+ * to handle out-of-order chunk delivery over lossy networks.
+ *
+ * Each inbound PTT session gets its own buffered stream keyed by sessionId.
+ * The library handles sequencing internally; we add a JS-level seq tracker
+ * only to detect and skip gaps on our side before handing off to native.
  */
 
-import { AudioStreamManager } from "@mykin-ai/expo-audio-stream";
-import { AUDIO_SAMPLE_RATE } from "../config";
+import { ExpoPlayAudioStream } from "@mykin-ai/expo-audio-stream";
 
 interface BufferedChunk {
   seq: number;
   pcmBase64: string;
 }
 
-// Per-session inbound buffer
 const sessionBuffers = new Map<string, BufferedChunk[]>();
 const sessionNextSeq = new Map<string, number>();
+const activeSessions = new Set<string>();
 
 // Gap timeout — if the next expected seq doesn't arrive within this window,
-// skip ahead to avoid indefinite playback stall
+// skip ahead to prevent indefinite playback stall
 const GAP_TIMEOUT_MS = 500;
 const gapTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
-let manager: AudioStreamManager | null = null;
-
 export async function initPlayback(): Promise<void> {
-  manager = new AudioStreamManager({
-    sampleRate: AUDIO_SAMPLE_RATE,
-    channels: 1,
-    encoding: "pcm_16bit",
-  });
-  await manager.init();
+  // No global init needed — each session initialises its own buffered stream
 }
 
 export async function receiveChunk(
@@ -38,11 +35,19 @@ export async function receiveChunk(
   seq: number,
   pcmBase64: string
 ): Promise<void> {
-  if (!manager) return;
-
-  if (!sessionBuffers.has(sessionId)) {
+  // Start a buffered stream for this session on first chunk
+  if (!activeSessions.has(sessionId)) {
+    activeSessions.add(sessionId);
     sessionBuffers.set(sessionId, []);
     sessionNextSeq.set(sessionId, 0);
+
+    try {
+      await ExpoPlayAudioStream.startBufferedAudioStream({
+        turnId: sessionId,
+      });
+    } catch {
+      // If stream can't start, still buffer — will attempt playback anyway
+    }
   }
 
   const buffer = sessionBuffers.get(sessionId)!;
@@ -54,54 +59,54 @@ export async function receiveChunk(
 
 function drainBuffer(sessionId: string): void {
   const buffer = sessionBuffers.get(sessionId);
-  if (!buffer || !manager) return;
+  if (!buffer) return;
 
-  const nextSeq = sessionNextSeq.get(sessionId) ?? 0;
-
-  // Clear any pending gap timer since we're draining
   const existingTimer = gapTimers.get(sessionId);
   if (existingTimer) clearTimeout(existingTimer);
 
-  let drained = false;
   while (buffer.length > 0 && buffer[0].seq === sessionNextSeq.get(sessionId)) {
     const chunk = buffer.shift()!;
-    manager.playChunk(chunk.pcmBase64, sessionId).catch(() => {});
+    const isFirst = chunk.seq === 0;
+    ExpoPlayAudioStream.playAudioBuffered(chunk.pcmBase64, sessionId, isFirst, false).catch(
+      () => {}
+    );
     sessionNextSeq.set(sessionId, chunk.seq + 1);
-    drained = true;
   }
 
-  // If there's still buffered content but the next expected seq is missing,
-  // set a gap timer to skip forward and prevent stall
+  // Set a gap timer to skip a missing seq and prevent playback stall
   if (buffer.length > 0) {
     const timer = setTimeout(() => {
       const current = sessionNextSeq.get(sessionId) ?? 0;
       if (buffer.length > 0 && buffer[0].seq > current) {
-        // Skip to next available
         sessionNextSeq.set(sessionId, buffer[0].seq);
         drainBuffer(sessionId);
       }
     }, GAP_TIMEOUT_MS);
     gapTimers.set(sessionId, timer);
   }
-
-  // Suppress unused variable warning
-  void nextSeq;
-  void drained;
 }
 
 export function endSession(sessionId: string): void {
-  sessionBuffers.delete(sessionId);
-  sessionNextSeq.delete(sessionId);
   const timer = gapTimers.get(sessionId);
   if (timer) clearTimeout(timer);
   gapTimers.delete(sessionId);
+
+  // Mark final chunk so native buffer can flush cleanly
+  const buffer = sessionBuffers.get(sessionId);
+  if (buffer && buffer.length > 0) {
+    const last = buffer[buffer.length - 1];
+    ExpoPlayAudioStream.playAudioBuffered(last.pcmBase64, sessionId, false, true).catch(() => {});
+  }
+
+  ExpoPlayAudioStream.stopBufferedAudioStream(sessionId).catch(() => {});
+
+  sessionBuffers.delete(sessionId);
+  sessionNextSeq.delete(sessionId);
+  activeSessions.delete(sessionId);
 }
 
 export async function teardownPlayback(): Promise<void> {
-  await manager?.stop();
-  manager = null;
-  sessionBuffers.clear();
-  sessionNextSeq.clear();
-  gapTimers.forEach(clearTimeout);
-  gapTimers.clear();
+  for (const sessionId of activeSessions) {
+    endSession(sessionId);
+  }
 }
