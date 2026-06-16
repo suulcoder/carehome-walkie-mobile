@@ -1,28 +1,11 @@
 /**
  * App configuration
  *
- * WS_URL options:
- *   Android emulator → host:   ws://10.0.2.2:8080/ws     (default below)
- *   iOS Simulator → host:      ws://localhost:8080/ws
- *   Physical device (any OS):  ws://<your-laptop-ip>:8080/ws
- *   Via simulator proxy:       ws://<laptop-ip>:9090
- *   Render (production):       wss://carehome-walkie-server.onrender.com/ws
- *
- * Change WS_URL to match your environment before running.
+ * Default: production backend on Render.
+ * For local development, change WS_URL — see README.md section "Local development".
  */
 
-import { Platform } from "react-native";
-
-// Automatically pick the right loopback address for emulator/simulator
-export const WS_URL: string = (() => {
-  if (Platform.OS === "android") {
-    return "ws://10.0.2.2:8080/ws"; // Android emulator loopback to host
-  }
-  if (Platform.OS === "ios") {
-    return "ws://localhost:8080/ws"; // iOS Simulator loopback to host
-  }
-  return "ws://localhost:8080/ws";
-})();
+export const WS_URL = "wss://carehome-walkie-server.onrender.com/ws";
 
 export const CHANNEL = "carehome-1";
 
