@@ -6,7 +6,7 @@
  *   iOS Simulator → host:      ws://localhost:8080/ws
  *   Physical device (any OS):  ws://<your-laptop-ip>:8080/ws
  *   Via simulator proxy:       ws://<laptop-ip>:9090
- *   Render (production):       wss://<service>.onrender.com/ws
+ *   Render (production):       wss://carehome-walkie-server.onrender.com/ws
  *
  * Change WS_URL to match your environment before running.
  */
