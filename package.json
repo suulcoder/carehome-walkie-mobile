@@ -3,10 +3,14 @@
   "version": "1.0.0",
   "main": "index.ts",
   "dependencies": {
+    "@mykin-ai/expo-audio-stream": "^0.3.5",
+    "@react-native-async-storage/async-storage": "2.2.0",
     "expo": "~56.0.12",
     "expo-status-bar": "~56.0.4",
+    "nanoid": "^5.1.11",
     "react": "19.2.3",
-    "react-native": "0.85.3"
+    "react-native": "0.85.3",
+    "react-native-haptic-feedback": "^3.0.0"
   },
   "devDependencies": {
     "@types/react": "~19.2.2",
