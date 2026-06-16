@@ -1,33 +1,23 @@
 /**
- * Audio playback wrapper using @mykin-ai/expo-audio-stream buffered API.
+ * Audio playback using expo-av (Expo SDK 56 compatible, iOS + Android).
  *
- * Works on both iOS and Android.
- * Uses the native jitter-buffer (startBufferedAudioStream / playAudioBuffered)
- * to handle out-of-order chunk delivery over lossy networks.
- *
- * Each inbound PTT session gets its own buffered stream keyed by sessionId.
- * The library handles sequencing internally; we add a JS-level seq tracker
- * only to detect and skip gaps on our side before handing off to native.
+ * Buffers incoming PCM chunks per session; plays the full message when ptt_end arrives.
  */
 
-import { ExpoPlayAudioStream } from "@mykin-ai/expo-audio-stream";
+import { Audio } from "expo-av";
+import * as FileSystem from "expo-file-system/legacy";
+import { concatPcmChunks, pcmToWavBase64, PcmChunk } from "./pcmUtils";
 
-interface BufferedChunk {
-  seq: number;
-  pcmBase64: string;
-}
-
-const sessionBuffers = new Map<string, BufferedChunk[]>();
-const sessionNextSeq = new Map<string, number>();
-const activeSessions = new Set<string>();
-
-// Gap timeout — if the next expected seq doesn't arrive within this window,
-// skip ahead to prevent indefinite playback stall
-const GAP_TIMEOUT_MS = 500;
-const gapTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const sessionBuffers = new Map<string, PcmChunk[]>();
+let activeSound: Audio.Sound | null = null;
 
 export async function initPlayback(): Promise<void> {
-  // No global init needed — each session initialises its own buffered stream
+  await Audio.setAudioModeAsync({
+    allowsRecordingIOS: true,
+    playsInSilentModeIOS: true,
+    playThroughEarpieceAndroid: false,
+    shouldDuckAndroid: true,
+  });
 }
 
 export async function receiveChunk(
@@ -35,78 +25,54 @@ export async function receiveChunk(
   seq: number,
   pcmBase64: string
 ): Promise<void> {
-  // Start a buffered stream for this session on first chunk
-  if (!activeSessions.has(sessionId)) {
-    activeSessions.add(sessionId);
+  if (!sessionBuffers.has(sessionId)) {
     sessionBuffers.set(sessionId, []);
-    sessionNextSeq.set(sessionId, 0);
-
-    try {
-      await ExpoPlayAudioStream.startBufferedAudioStream({
-        turnId: sessionId,
-      });
-    } catch {
-      // If stream can't start, still buffer — will attempt playback anyway
-    }
   }
-
   const buffer = sessionBuffers.get(sessionId)!;
-  buffer.push({ seq, pcmBase64 });
-  buffer.sort((a, b) => a.seq - b.seq);
-
-  drainBuffer(sessionId);
-}
-
-function drainBuffer(sessionId: string): void {
-  const buffer = sessionBuffers.get(sessionId);
-  if (!buffer) return;
-
-  const existingTimer = gapTimers.get(sessionId);
-  if (existingTimer) clearTimeout(existingTimer);
-
-  while (buffer.length > 0 && buffer[0].seq === sessionNextSeq.get(sessionId)) {
-    const chunk = buffer.shift()!;
-    const isFirst = chunk.seq === 0;
-    ExpoPlayAudioStream.playAudioBuffered(chunk.pcmBase64, sessionId, isFirst, false).catch(
-      () => {}
-    );
-    sessionNextSeq.set(sessionId, chunk.seq + 1);
-  }
-
-  // Set a gap timer to skip a missing seq and prevent playback stall
-  if (buffer.length > 0) {
-    const timer = setTimeout(() => {
-      const current = sessionNextSeq.get(sessionId) ?? 0;
-      if (buffer.length > 0 && buffer[0].seq > current) {
-        sessionNextSeq.set(sessionId, buffer[0].seq);
-        drainBuffer(sessionId);
-      }
-    }, GAP_TIMEOUT_MS);
-    gapTimers.set(sessionId, timer);
+  if (!buffer.some((c) => c.seq === seq)) {
+    buffer.push({ seq, pcmBase64 });
   }
 }
 
-export function endSession(sessionId: string): void {
-  const timer = gapTimers.get(sessionId);
-  if (timer) clearTimeout(timer);
-  gapTimers.delete(sessionId);
-
-  // Mark final chunk so native buffer can flush cleanly
-  const buffer = sessionBuffers.get(sessionId);
-  if (buffer && buffer.length > 0) {
-    const last = buffer[buffer.length - 1];
-    ExpoPlayAudioStream.playAudioBuffered(last.pcmBase64, sessionId, false, true).catch(() => {});
-  }
-
-  ExpoPlayAudioStream.stopBufferedAudioStream(sessionId).catch(() => {});
-
+export async function endSession(sessionId: string): Promise<void> {
+  const chunks = sessionBuffers.get(sessionId);
   sessionBuffers.delete(sessionId);
-  sessionNextSeq.delete(sessionId);
-  activeSessions.delete(sessionId);
+  if (!chunks || chunks.length === 0) return;
+
+  try {
+    if (activeSound) {
+      await activeSound.unloadAsync();
+      activeSound = null;
+    }
+
+    const pcm = concatPcmChunks(chunks);
+    if (pcm.length === 0) return;
+
+    const wavBase64 = pcmToWavBase64(pcm);
+    const path = `${FileSystem.cacheDirectory}ptt-${sessionId}.wav`;
+    await FileSystem.writeAsStringAsync(path, wavBase64, {
+      encoding: FileSystem.EncodingType.Base64,
+    });
+
+    const { sound } = await Audio.Sound.createAsync({ uri: path });
+    activeSound = sound;
+    sound.setOnPlaybackStatusUpdate((status) => {
+      if (status.isLoaded && status.didJustFinish) {
+        sound.unloadAsync().catch(() => {});
+        FileSystem.deleteAsync(path, { idempotent: true }).catch(() => {});
+        if (activeSound === sound) activeSound = null;
+      }
+    });
+    await sound.playAsync();
+  } catch (err) {
+    console.error("[playback]", err);
+  }
 }
 
 export async function teardownPlayback(): Promise<void> {
-  for (const sessionId of activeSessions) {
-    endSession(sessionId);
+  if (activeSound) {
+    await activeSound.unloadAsync();
+    activeSound = null;
   }
+  sessionBuffers.clear();
 }

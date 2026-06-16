@@ -37,7 +37,7 @@ curl https://carehome-walkie-server.onrender.com/health
 - **Android**: Android Studio with an emulator or a physical device + Java 17+
 - **iOS**: Xcode 15+ (macOS only) with a Simulator or a physical iPhone/iPad
 
-> **Important**: This app uses native audio streaming and requires a **dev build**. It does not work in Expo Go.
+> **Important**: This app uses native audio (`expo-av`) and requires a **dev build**. It does not work in Expo Go.
 
 ---
 

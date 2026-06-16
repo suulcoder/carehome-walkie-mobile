@@ -155,27 +155,27 @@ export default function App() {
 
     wsRef.current.sendPttStart(sessionId);
 
-    await startCapture({
-      onChunk: (pcmBase64, seq) => {
-        wsRef.current?.sendAudioChunk(sessionId, seq, pcmBase64);
-      },
-      onError: (err) => {
-        console.error("[capture]", err);
-        Alert.alert("Microphone error", err.message);
-        handlePttOut();
-      },
-    });
+    try {
+      await startCapture();
+    } catch (err) {
+      console.error("[capture]", err);
+      Alert.alert("Microphone error", err instanceof Error ? err.message : String(err));
+      handlePttOut();
+    }
   };
 
   const handlePttOut = async () => {
     if (!isTalking) return;
     ReactNativeHapticFeedback.trigger("impactLight", { enableVibrateFallback: true });
 
-    await stopCapture();
-
     const sessionId = activePttSession.current;
-    if (sessionId) {
-      wsRef.current?.sendPttEnd(sessionId);
+    const chunks = await stopCapture();
+
+    if (sessionId && wsRef.current) {
+      for (const chunk of chunks) {
+        wsRef.current.sendAudioChunk(sessionId, chunk.seq, chunk.pcmBase64);
+      }
+      wsRef.current.sendPttEnd(sessionId);
       activePttSession.current = null;
     }
     setIsTalking(false);

@@ -8,10 +8,10 @@
     "userInterfaceStyle": "light",
     "ios": {
       "supportsTablet": false,
+      "bundleIdentifier": "com.suulcoder.carehomewalkie",
       "infoPlist": {
         "NSMicrophoneUsageDescription": "This app uses the microphone to send voice messages over the walkie-talkie channel."
-      },
-      "bundleIdentifier": "com.anonymous.carehomewalkiemobile"
+      }
     },
     "android": {
       "adaptiveIcon": {
@@ -25,24 +25,13 @@
         "android.permission.RECORD_AUDIO",
         "android.permission.MODIFY_AUDIO_SETTINGS"
       ],
-      "package": "com.anonymous.carehomewalkiemobile"
+      "package": "com.suulcoder.carehomewalkie"
     },
     "web": {
       "favicon": "./assets/favicon.png"
     },
     "plugins": [
-      "react-native-haptic-feedback",
-      [
-        "@mykin-ai/expo-audio-stream",
-        {
-          "ios": {
-            "microphonePermission": "This app uses the microphone for push-to-talk."
-          },
-          "android": {
-            "audioRecordingPermission": "This app uses the microphone for push-to-talk."
-          }
-        }
-      ]
+      "react-native-haptic-feedback"
     ]
   }
 }
