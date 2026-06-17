@@ -1,10 +1,11 @@
 import React from "react";
 import { View, Text, StyleSheet } from "react-native";
 import { PeerInfo } from "../network/protocol";
+import { colors, radii } from "./theme";
 
 interface Props {
   peers: PeerInfo[];
-  activeSpeaker: string | null; // clientId of peer currently talking
+  activeSpeaker: string | null;
 }
 
 export function PeerList({ peers, activeSpeaker }: Props) {
@@ -42,13 +43,13 @@ const styles = StyleSheet.create({
   heading: {
     fontSize: 11,
     fontWeight: "700",
-    color: "#6b7280",
+    color: colors.text.secondary,
     letterSpacing: 1.2,
     textTransform: "uppercase",
     marginBottom: 10,
   },
   empty: {
-    color: "#9ca3af",
+    color: colors.text.muted,
     fontSize: 14,
     textAlign: "center",
     fontStyle: "italic",
@@ -58,34 +59,35 @@ const styles = StyleSheet.create({
     alignItems: "center",
     paddingVertical: 8,
     paddingHorizontal: 12,
-    borderRadius: 8,
+    borderRadius: radii.sm,
     marginBottom: 4,
-    backgroundColor: "#f3f4f6",
+    backgroundColor: colors.surfaceMuted,
   },
   rowActive: {
-    backgroundColor: "#fef9c3",
+    backgroundColor: colors.transmitMuted,
   },
   dot: {
     width: 10,
     height: 10,
     borderRadius: 5,
-    backgroundColor: "#d1d5db",
+    backgroundColor: colors.border.default,
     marginRight: 10,
   },
   dotActive: {
-    backgroundColor: "#16a34a",
+    backgroundColor: colors.transmit,
   },
   name: {
     fontSize: 15,
-    color: "#111827",
+    color: colors.text.primary,
     flex: 1,
   },
   nameActive: {
     fontWeight: "700",
+    color: colors.transmitDark,
   },
   speaking: {
     fontSize: 12,
-    color: "#16a34a",
+    color: colors.transmit,
     fontStyle: "italic",
   },
 });

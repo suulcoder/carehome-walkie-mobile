@@ -1,31 +1,19 @@
 /**
- * App configuration
+ * App configuration — tuneable constants live here.
  *
- * WS_URL options:
- *   Android emulator → host:   ws://10.0.2.2:8080/ws     (default below)
- *   iOS Simulator → host:      ws://localhost:8080/ws
- *   Physical device (any OS):  ws://<your-laptop-ip>:8080/ws
- *   Via simulator proxy:       ws://<laptop-ip>:9090
- *   Render (production):       wss://carehome-walkie-server.onrender.com/ws
- *
- * Change WS_URL to match your environment before running.
+ * Backend target: set WS_ENV below, or EXPO_PUBLIC_WS_ENV in .env.local
+ * Physical device on Wi‑Fi: EXPO_PUBLIC_DEV_MACHINE_HOST in .env.local (see .env.example)
  */
 
-import { Platform } from "react-native";
+import { parseWsEnvironment, resolveWsUrl, type WsEnvironment } from "./config/resolveWsUrl";
 
-// Code for local development or when simulating bad network conditions
-// // Automatically pick the right loopback address for emulator/simulator
-// export const WS_URL: string = (() => {
-//   if (Platform.OS === "android") {
-//     return "ws://10.0.2.2:8080/ws"; // Android emulator loopback to host
-//   }
-//   if (Platform.OS === "ios") {
-//     return "ws://localhost:8080/ws"; // iOS Simulator loopback to host
-//   }
-//   return "ws://localhost:8080/ws";
-// })();
+export type { WsEnvironment };
 
-export const WS_URL = "wss://carehome-walkie-server.onrender.com/ws";
+/** Active backend target. Override via EXPO_PUBLIC_WS_ENV without editing code. */
+export const WS_ENV: WsEnvironment = parseWsEnvironment();
+
+/** Resolved WebSocket URL for the current platform and WS_ENV. */
+export const WS_URL = resolveWsUrl(WS_ENV);
 
 export const CHANNEL = "carehome-1";
 
@@ -35,3 +23,6 @@ export const RECONNECT_BASE_MS = 1_000;
 export const RECONNECT_MAX_MS = 30_000;
 export const PING_INTERVAL_MS = 15_000;
 export const PING_TIMEOUT_MS = 5_000;
+
+/** After ptt_end, if no new chunk arrives for this long, play what was received. Resets on each chunk. */
+export const CHUNK_ARRIVAL_GRACE_MS = 5_000;

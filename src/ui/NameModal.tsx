@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import {
   Modal,
   View,
@@ -9,14 +9,29 @@ import {
   KeyboardAvoidingView,
   Platform,
 } from "react-native";
+import { colors, radii } from "./theme";
 
 interface Props {
   visible: boolean;
+  mode?: "welcome" | "edit";
+  initialName?: string;
   onSubmit: (name: string) => void;
+  onCancel?: () => void;
 }
 
-export function NameModal({ visible, onSubmit }: Props) {
-  const [name, setName] = useState("");
+export function NameModal({
+  visible,
+  mode = "welcome",
+  initialName = "",
+  onSubmit,
+  onCancel,
+}: Props) {
+  const [name, setName] = useState(initialName);
+  const isEdit = mode === "edit";
+
+  useEffect(() => {
+    if (visible) setName(initialName);
+  }, [visible, initialName]);
 
   const handleSubmit = () => {
     const trimmed = name.trim();
@@ -30,17 +45,21 @@ export function NameModal({ visible, onSubmit }: Props) {
         behavior={Platform.OS === "ios" ? "padding" : undefined}
       >
         <View style={styles.card}>
-          <Text style={styles.title}>Welcome</Text>
-          <Text style={styles.subtitle}>Enter your display name to join the channel</Text>
+          <Text style={styles.title}>{isEdit ? "Change name" : "Welcome"}</Text>
+          <Text style={styles.subtitle}>
+            {isEdit
+              ? "Your new name will appear to others on the channel"
+              : "Enter your display name to join the channel"}
+          </Text>
           <TextInput
             style={styles.input}
             placeholder="Your name…"
-            placeholderTextColor="#9ca3af"
+            placeholderTextColor={colors.text.muted}
             value={name}
             onChangeText={setName}
             autoFocus
             maxLength={30}
-            returnKeyType="join"
+            returnKeyType="done"
             onSubmitEditing={handleSubmit}
           />
           <Pressable
@@ -48,8 +67,13 @@ export function NameModal({ visible, onSubmit }: Props) {
             onPress={handleSubmit}
             disabled={name.trim().length === 0}
           >
-            <Text style={styles.buttonText}>Join Channel</Text>
+            <Text style={styles.buttonText}>{isEdit ? "Save name" : "Join channel"}</Text>
           </Pressable>
+          {isEdit && onCancel ? (
+            <Pressable style={styles.cancelButton} onPress={onCancel}>
+              <Text style={styles.cancelText}>Cancel</Text>
+            </Pressable>
+          ) : null}
         </View>
       </KeyboardAvoidingView>
     </Modal>
@@ -59,57 +83,68 @@ export function NameModal({ visible, onSubmit }: Props) {
 const styles = StyleSheet.create({
   overlay: {
     flex: 1,
-    backgroundColor: "rgba(0,0,0,0.6)",
+    backgroundColor: colors.overlay,
     alignItems: "center",
     justifyContent: "center",
   },
   card: {
     width: "85%",
-    backgroundColor: "#fff",
-    borderRadius: 20,
+    backgroundColor: colors.surface,
+    borderRadius: radii.lg,
     padding: 28,
     alignItems: "center",
-    shadowColor: "#000",
-    shadowOpacity: 0.25,
+    shadowColor: colors.shadow,
+    shadowOpacity: 0.18,
     shadowRadius: 20,
     elevation: 10,
   },
   title: {
     fontSize: 26,
     fontWeight: "800",
-    color: "#111827",
+    color: colors.text.primary,
     marginBottom: 6,
   },
   subtitle: {
     fontSize: 14,
-    color: "#6b7280",
+    color: colors.text.secondary,
     textAlign: "center",
     marginBottom: 20,
+    lineHeight: 20,
   },
   input: {
     width: "100%",
     borderWidth: 1.5,
-    borderColor: "#d1d5db",
-    borderRadius: 10,
+    borderColor: colors.border.default,
+    borderRadius: radii.md,
     paddingVertical: 12,
     paddingHorizontal: 16,
     fontSize: 16,
-    color: "#111827",
+    color: colors.text.primary,
     marginBottom: 16,
+    backgroundColor: colors.background,
   },
   button: {
     width: "100%",
-    backgroundColor: "#1e40af",
-    borderRadius: 10,
+    backgroundColor: colors.primary,
+    borderRadius: radii.md,
     paddingVertical: 14,
     alignItems: "center",
   },
   buttonDisabled: {
-    backgroundColor: "#93c5fd",
+    backgroundColor: colors.primaryMuted,
   },
   buttonText: {
-    color: "#fff",
+    color: colors.text.inverse,
     fontWeight: "700",
     fontSize: 16,
+  },
+  cancelButton: {
+    marginTop: 12,
+    paddingVertical: 8,
+  },
+  cancelText: {
+    color: colors.text.secondary,
+    fontSize: 15,
+    fontWeight: "600",
   },
 });

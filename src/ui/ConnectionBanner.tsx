@@ -1,6 +1,7 @@
 import React from "react";
-import { View, Text, StyleSheet, Animated } from "react-native";
+import { View, Text, StyleSheet } from "react-native";
 import { ConnectionState } from "../network/wsClient";
+import { colors } from "./theme";
 
 interface Props {
   state: ConnectionState;
@@ -8,10 +9,10 @@ interface Props {
 }
 
 const STATE_CONFIG: Record<ConnectionState, { color: string; label: string }> = {
-  connected: { color: "#22c55e", label: "Connected" },
-  connecting: { color: "#f59e0b", label: "Connecting…" },
-  reconnecting: { color: "#f59e0b", label: "Reconnecting…" },
-  disconnected: { color: "#ef4444", label: "Offline" },
+  connected: { color: colors.banner.connected, label: "Connected" },
+  connecting: { color: colors.banner.connecting, label: "Connecting…" },
+  reconnecting: { color: colors.banner.connecting, label: "Reconnecting…" },
+  disconnected: { color: colors.banner.disconnected, label: "Offline" },
 };
 
 export function ConnectionBanner({ state, queuedCount }: Props) {
@@ -39,13 +40,13 @@ const styles = StyleSheet.create({
     alignItems: "center",
   },
   label: {
-    color: "#fff",
+    color: colors.text.inverse,
     fontWeight: "700",
     fontSize: 13,
     letterSpacing: 0.3,
   },
   queue: {
-    color: "rgba(255,255,255,0.9)",
+    color: "rgba(255,255,255,0.92)",
     fontSize: 12,
   },
 });

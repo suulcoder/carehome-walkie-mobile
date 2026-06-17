@@ -4,24 +4,30 @@
   "main": "index.ts",
   "dependencies": {
     "@react-native-async-storage/async-storage": "2.2.0",
+    "@tanstack/react-query": "^5.101.0",
     "expo": "~56.0.12",
-    "expo-av": "^16.0.8",
+    "expo-audio": "~56.0.12",
     "expo-file-system": "~56.0.8",
     "expo-status-bar": "~56.0.4",
     "nanoid": "^5.1.11",
     "react": "19.2.3",
     "react-native": "0.85.3",
-    "react-native-haptic-feedback": "^3.0.0"
+    "react-native-haptic-feedback": "^3.0.0",
+    "react-native-safe-area-context": "~5.7.0"
   },
   "devDependencies": {
     "@types/react": "~19.2.2",
+    "patch-package": "^8.0.1",
     "typescript": "~6.0.3"
   },
   "scripts": {
-    "start": "expo start",
-    "android": "expo run:android",
+    "start": "EXPO_DEV_SERVER_LISTEN_ADDRESS=0.0.0.0 expo start",
+    "android:reverse": "bash scripts/adb-reverse-all.sh",
+    "android:all": "bash scripts/run-android-all.sh",
+    "android": "npm run android:reverse && npm run android:all",
     "ios": "expo run:ios",
-    "web": "expo start --web"
+    "web": "expo start --web",
+    "postinstall": "patch-package"
   },
   "private": true
 }

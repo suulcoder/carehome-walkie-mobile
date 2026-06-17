@@ -10,7 +10,10 @@
       "supportsTablet": false,
       "bundleIdentifier": "com.suulcoder.carehomewalkie",
       "infoPlist": {
-        "NSMicrophoneUsageDescription": "This app uses the microphone to send voice messages over the walkie-talkie channel."
+        "NSMicrophoneUsageDescription": "This app uses the microphone to send voice messages over the walkie-talkie channel.",
+        "NSAppTransportSecurity": {
+          "NSAllowsLocalNetworking": true
+        }
       }
     },
     "android": {
@@ -31,7 +34,9 @@
       "favicon": "./assets/favicon.png"
     },
     "plugins": [
-      "react-native-haptic-feedback"
+      "react-native-haptic-feedback",
+      "expo-audio",
+      "./plugins/withAndroidMetroHost"
     ]
   }
 }

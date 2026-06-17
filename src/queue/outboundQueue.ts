@@ -17,10 +17,12 @@ export interface QueuedChunk {
 export interface QueuedSession {
   sessionId: string;
   chunks: QueuedChunk[];
-  ended: boolean; // true once ptt_end was intended to be sent
+  ended: boolean;
+  sampleRate?: number;
+  chunkCount?: number;
 }
 
-export async function enqueueChunk(session: QueuedSession): Promise<void> {
+async function persistSession(session: QueuedSession): Promise<void> {
   try {
     await AsyncStorage.setItem(QUEUE_KEY_PREFIX + session.sessionId, JSON.stringify(session));
   } catch {
@@ -28,11 +30,13 @@ export async function enqueueChunk(session: QueuedSession): Promise<void> {
   }
 }
 
-export async function markSessionEnded(sessionId: string, chunks: QueuedChunk[]): Promise<void> {
-  try {
-    const session: QueuedSession = { sessionId, chunks, ended: true };
-    await AsyncStorage.setItem(QUEUE_KEY_PREFIX + sessionId, JSON.stringify(session));
-  } catch {}
+export async function enqueueChunk(session: QueuedSession): Promise<void> {
+  await persistSession(session);
+}
+
+export async function markSessionEnded(session: QueuedSession): Promise<void> {
+  session.ended = true;
+  await persistSession(session);
 }
 
 export async function removeSession(sessionId: string): Promise<void> {

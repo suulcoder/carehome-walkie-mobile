@@ -43,8 +43,8 @@ export function extractPcmFromWav(wavBytes: Uint8Array): Uint8Array {
   return wavBytes.slice(44);
 }
 
-/** Wrap raw PCM16 LE mono in a WAV container and return base64. */
-export function pcmToWavBase64(pcm: Uint8Array, sampleRate = AUDIO_SAMPLE_RATE): string {
+/** Wrap raw PCM16 LE mono in a WAV container. */
+export function pcmToWavBytes(pcm: Uint8Array, sampleRate = AUDIO_SAMPLE_RATE): Uint8Array {
   const numChannels = 1;
   const bitsPerSample = 16;
   const byteRate = sampleRate * numChannels * (bitsPerSample / 8);
@@ -72,14 +72,20 @@ export function pcmToWavBase64(pcm: Uint8Array, sampleRate = AUDIO_SAMPLE_RATE):
   view.setUint32(40, dataSize, true);
 
   new Uint8Array(buffer, 44).set(pcm);
-  return bytesToBase64(new Uint8Array(buffer));
+  return new Uint8Array(buffer);
 }
 
-export function splitPcmIntoChunks(pcm: Uint8Array): PcmChunk[] {
+/** Wrap raw PCM16 LE mono in a WAV container and return base64. */
+export function pcmToWavBase64(pcm: Uint8Array, sampleRate = AUDIO_SAMPLE_RATE): string {
+  return bytesToBase64(pcmToWavBytes(pcm, sampleRate));
+}
+
+export function splitPcmIntoChunks(pcm: Uint8Array, sampleRate = AUDIO_SAMPLE_RATE): PcmChunk[] {
+  const chunkBytes = Math.max(2, Math.floor(sampleRate * 0.02 * 2));
   const chunks: PcmChunk[] = [];
   let seq = 0;
-  for (let i = 0; i < pcm.length; i += CHUNK_PCM_BYTES) {
-    const slice = pcm.slice(i, i + CHUNK_PCM_BYTES);
+  for (let i = 0; i < pcm.length; i += chunkBytes) {
+    const slice = pcm.slice(i, i + chunkBytes);
     chunks.push({ seq: seq++, pcmBase64: bytesToBase64(slice) });
   }
   return chunks;
@@ -96,4 +102,60 @@ export function concatPcmChunks(chunks: PcmChunk[]): Uint8Array {
     offset += part.length;
   }
   return out;
+}
+
+/**
+ * Concatenate chunks in seq order, filling missing sequences with silence.
+ * Used when some chunks are still in transit or were lost on an unreliable network.
+ */
+export function concatPcmChunksWithGaps(
+  chunks: PcmChunk[],
+  expectedCount: number,
+  sampleRate = AUDIO_SAMPLE_RATE
+): { pcm: Uint8Array; gapsFilled: number } {
+  const bySeq = new Map(chunks.map((c) => [c.seq, base64ToBytes(c.pcmBase64)]));
+  const sampleSizes = chunks.map((c) => bySeq.get(c.seq)!.length);
+  const chunkBytes =
+    sampleSizes.length > 0
+      ? Math.round(sampleSizes.reduce((a, b) => a + b, 0) / sampleSizes.length)
+      : Math.max(2, Math.floor(sampleRate * 0.02 * 2));
+
+  const parts: Uint8Array[] = [];
+  let gapsFilled = 0;
+
+  for (let seq = 0; seq < expectedCount; seq++) {
+    const bytes = bySeq.get(seq);
+    if (bytes) {
+      parts.push(bytes);
+    } else {
+      parts.push(new Uint8Array(chunkBytes));
+      gapsFilled += 1;
+    }
+  }
+
+  const total = parts.reduce((n, p) => n + p.length, 0);
+  const pcm = new Uint8Array(total);
+  let offset = 0;
+  for (const part of parts) {
+    pcm.set(part, offset);
+    offset += part.length;
+  }
+
+  return { pcm, gapsFilled };
+}
+
+/** Peak amplitude for PCM16 LE mono (0–32767). 0 usually means silence or no mic signal. */
+export function measurePcmPeak(pcm: Uint8Array): number {
+  let peak = 0;
+  for (let i = 0; i + 1 < pcm.length; i += 2) {
+    const sample = pcm[i] | (pcm[i + 1] << 8);
+    const signed = sample > 32767 ? sample - 65536 : sample;
+    peak = Math.max(peak, Math.abs(signed));
+  }
+  return peak;
+}
+
+export function pcmDurationMs(pcmBytes: number, sampleRate = AUDIO_SAMPLE_RATE): number {
+  const samples = pcmBytes / 2;
+  return Math.round((samples / sampleRate) * 1000);
 }

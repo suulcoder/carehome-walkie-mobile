@@ -16,7 +16,7 @@ The app connects by default to the deployed relay server on Render:
 | WebSocket | `wss://carehome-walkie-server.onrender.com/ws` |
 | Health check | `https://carehome-walkie-server.onrender.com/health` |
 
-Configured in [`src/config.ts`](./src/config.ts). No changes needed to run against production.
+Configured in [`src/config.ts`](./src/config.ts) (`WS_ENV = "production"`). No changes needed to run against production.
 
 Verify the server is up:
 
@@ -37,7 +37,7 @@ curl https://carehome-walkie-server.onrender.com/health
 - **Android**: Android Studio with an emulator or a physical device + Java 17+
 - **iOS**: Xcode 15+ (macOS only) with a Simulator or a physical iPhone/iPad
 
-> **Important**: This app uses native audio (`expo-av`) and requires a **dev build**. It does not work in Expo Go.
+> **Important**: This app uses native audio (`expo-audio`) and requires a **dev build**. It does not work in Expo Go.
 
 ---
 
@@ -98,18 +98,34 @@ npm install && npm run dev
 
 ### Step 2 — Point the app at localhost
 
-Edit [`src/config.ts`](./src/config.ts) and replace `WS_URL`:
+In [`src/config/resolveWsUrl.ts`](./src/config/resolveWsUrl.ts), set:
 
 ```typescript
-// Android emulator → host machine
-export const WS_URL = "ws://10.0.2.2:8080/ws";
-
-// iOS Simulator → host machine
-export const WS_URL = "ws://localhost:8080/ws";
-
-// Physical device (Android or iOS) on same Wi-Fi as your laptop
-export const WS_URL = "ws://192.168.1.42:8080/ws";   // use your laptop's IP
+export const DEFAULT_WS_ENV: WsEnvironment = "local";
 ```
+
+Or in `.env.local` (copy from [`.env.example`](./.env.example)):
+
+```bash
+EXPO_PUBLIC_WS_ENV=local
+```
+
+The URL is resolved automatically:
+
+| Runtime | Host used |
+|---|---|
+| Android emulator | `10.0.2.2` |
+| iOS Simulator | `localhost` |
+| Physical device | `EXPO_PUBLIC_DEV_MACHINE_HOST` in `.env.local` |
+
+Physical device example (same Wi‑Fi as your laptop):
+
+```bash
+# .env.local — not committed
+EXPO_PUBLIC_DEV_MACHINE_HOST=192.168.1.42
+```
+
+Find your laptop IP: `ipconfig getifaddr en0` (macOS) or `hostname -I` (Linux).
 
 ### Step 3 — Run the app
 
@@ -119,11 +135,7 @@ npx expo run:android
 npx expo run:ios
 ```
 
-When done testing locally, set `WS_URL` back to production:
-
-```typescript
-export const WS_URL = "wss://carehome-walkie-server.onrender.com/ws";
-```
+When done testing locally, set `DEFAULT_WS_ENV` back to `"production"` (or remove `EXPO_PUBLIC_WS_ENV` from `.env.local`).
 
 ---
 
@@ -139,22 +151,28 @@ npm install
 npm start -- \
   --target wss://carehome-walkie-server.onrender.com/ws \
   --listen 9090 \
-  --drop-rate 0.2 \
-  --latency 500
+  --drop-rate 0.1 \
+  --latency 200
 ```
 
-Then in `src/config.ts`, point at the **proxy** (not Render directly):
+> **Tip:** `--drop-rate 0.2 --latency 500` is intentionally harsh (good for stress tests).
+> Control messages (ping/pong/join) are never dropped by the proxy, but high drop rates
+> still affect audio chunks. Start with `--drop-rate 0.05 --latency 150` and increase gradually.
+
+Then point the app at the proxy — no manual URLs per platform:
 
 ```typescript
-// Android emulator
-export const WS_URL = "ws://10.0.2.2:9090";
-
-// iOS Simulator
-export const WS_URL = "ws://localhost:9090";
-
-// Physical device on same Wi-Fi as laptop
-export const WS_URL = "ws://192.168.1.42:9090";
+// src/config/resolveWsUrl.ts
+export const DEFAULT_WS_ENV: WsEnvironment = "network_simulator";
 ```
+
+Or in `.env.local`:
+
+```bash
+EXPO_PUBLIC_WS_ENV=network_simulator
+```
+
+Host resolution is automatic (emulator → `10.0.2.2`, iOS Simulator → `localhost`, physical device → `EXPO_PUBLIC_DEV_MACHINE_HOST`). Restart Metro after changing env files.
 
 ### Against local server
 
@@ -162,7 +180,7 @@ export const WS_URL = "ws://192.168.1.42:9090";
 npm start -- --target ws://localhost:8080/ws --listen 9090 --drop-rate 0.2 --latency 500
 ```
 
-Use the same proxy URLs above in `src/config.ts`.
+Use the same `network_simulator` config as above (`DEFAULT_WS_ENV` or `EXPO_PUBLIC_WS_ENV=network_simulator`).
 
 ### Manual test scenarios
 
