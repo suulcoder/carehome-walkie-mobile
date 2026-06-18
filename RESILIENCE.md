@@ -127,3 +127,4 @@ Without this, iOS routes audio to the earpiece instead of the speaker, or the mi
 5. **Automated E2E tests**: the simulator proxy covers network-level scenarios, but a full Maestro or Detox test suite would close the loop on UI behaviour.
 6. **Reconnect jitter**: the current backoff is deterministic; adding random jitter would prevent reconnect storms after a server restart when many devices reconnect simultaneously.
 7. **Sentry / Datadog integration**: the telemetry pipeline is structured for this (every log has a level, module, and event name), but the actual forwarding hook is a TODO.
+8. **Manage queues** Tests need to be done over queue of messages comming while talking
