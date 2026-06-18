@@ -27,7 +27,7 @@ export const CHUNK_DURATION_MS = 20;
  * Good network → near minMs (~300 ms). High jitter → grows toward maxMs (~1.5 s).
  */
 export const JITTER_MIN_PLAYOUT_MS = 300;
-export const JITTER_MAX_PLAYOUT_MS = 2_500;
+export const JITTER_MAX_PLAYOUT_MS = 3_500;
 export const JITTER_MARGIN_FACTOR = 4;
 
 /** If a sequence hole persists this long after the last chunk, fill with silence and continue. */

@@ -234,12 +234,15 @@ function selectPlaybackRange(session: ReceiveSession, mode: PlayMode): SegmentSe
   }
 
   if (mode === "final_partial") {
-    const endSeq =
-      session.expectedCount !== undefined
-        ? session.expectedCount - 1
-        : Math.max(...session.chunks.map((c) => c.seq), session.nextPlaySeq - 1);
+    const received = session.chunks.filter((c) => c.seq >= session.nextPlaySeq);
+    if (received.length === 0) return null;
+    const endSeq = Math.max(...received.map((c) => c.seq));
     if (endSeq < session.nextPlaySeq) return null;
-    return { startSeq: session.nextPlaySeq, endSeq, useGapFill: true };
+    const useGapFill =
+      gapFillAllowed(session) &&
+      session.expectedCount !== undefined &&
+      hasAllExpectedChunks(session);
+    return { startSeq: session.nextPlaySeq, endSeq, useGapFill };
   }
 
   const windowBytes = windowPcmBytes(session);
@@ -275,6 +278,43 @@ function selectPlaybackRange(session: ReceiveSession, mode: PlayMode): SegmentSe
 
   if (endSeq < session.nextPlaySeq) return null;
   return { startSeq: session.nextPlaySeq, endSeq, useGapFill: allowGapFill };
+}
+
+function cancelActivePlayback(): void {
+  if (activePlayer) {
+    try {
+      activePlayer.remove();
+    } catch {
+      // non-fatal
+    }
+    activePlayer = null;
+  }
+}
+
+function preemptForLiveSession(sessionId: string): void {
+  cancelActivePlayback();
+  livePlaybackDepth = 0;
+
+  for (const [id, session] of sessions) {
+    if (id !== sessionId) {
+      clearSessionTimers(session);
+      sessions.delete(id);
+    }
+  }
+
+  const staleIdx = pendingPlayQueue.findIndex(
+    (item) => item.kind === "live" && item.sessionId !== sessionId
+  );
+  if (staleIdx !== -1) {
+    pendingPlayQueue.splice(
+      0,
+      pendingPlayQueue.length,
+      ...pendingPlayQueue.filter(
+        (item) => item.kind !== "live" || item.sessionId === sessionId
+      )
+    );
+    telemetry.info("playback", "preempt_stale_queue", { sessionId });
+  }
 }
 
 function cleanupSession(sessionId: string, session: ReceiveSession): void {
@@ -395,6 +435,12 @@ export function replayStoredMessage(message: StoredMessage): void {
 async function drainPlaybackQueue(): Promise<void> {
   while (pendingPlayQueue.length > 0) {
     const item = pendingPlayQueue[0];
+    if (item.kind === "live" && !sessions.has(item.sessionId)) {
+      telemetry.debug("playback", "drop_stale_queue_item", { sessionId: item.sessionId });
+      pendingPlayQueue.shift();
+      continue;
+    }
+
     const played =
       item.kind === "live"
         ? await tryPlaySession(item.sessionId, item.mode)
@@ -417,28 +463,31 @@ export function beginReceiveSession(
     telemetry.debug("playback", "skip_own_session", { sessionId, data: { fromName: from?.name } });
     return;
   }
+
+  preemptForLiveSession(sessionId);
+
   const existing = sessions.get(sessionId);
   clearSessionTimers(getSession(sessionId));
   sessions.set(sessionId, {
-    chunks: existing?.chunks ?? [],
+    chunks: [],
     sampleRate: existing?.sampleRate ?? AUDIO_SAMPLE_RATE,
     fromId: from?.id ?? existing?.fromId ?? "unknown",
     fromName: from?.name ?? existing?.fromName ?? "Unknown",
-    expectedCount: existing?.expectedCount,
-    endReceived: existing?.endReceived ?? false,
-    endReceivedAt: existing?.endReceivedAt,
-    completedAt: existing?.completedAt,
+    expectedCount: undefined,
+    endReceived: false,
+    endReceivedAt: undefined,
+    completedAt: undefined,
     playing: false,
-    nextPlaySeq: existing?.nextPlaySeq ?? 0,
-    lastChunkAt: existing?.lastChunkAt ?? 0,
-    jitterEstimator: existing?.jitterEstimator ?? new JitterEstimator(CHUNK_DURATION_MS),
-    playoutDelayMs: existing?.playoutDelayMs ?? JITTER_MIN_PLAYOUT_MS,
-    streamingPlayback: existing?.streamingPlayback ?? false,
+    nextPlaySeq: 0,
+    lastChunkAt: 0,
+    jitterEstimator: new JitterEstimator(CHUNK_DURATION_MS),
+    playoutDelayMs: JITTER_MIN_PLAYOUT_MS,
+    streamingPlayback: false,
   });
   telemetry.session("receiver", sessionId, { peerName: from?.name, status: "active" });
   telemetry.info("playback", "session_begin", {
     sessionId,
-    data: { peerName: from?.name, preservedChunks: existing?.chunks.length ?? 0 },
+    data: { peerName: from?.name },
   });
 }
 
@@ -661,7 +710,11 @@ async function tryPlayStoredMessage(message: StoredMessage): Promise<boolean> {
 
 async function tryPlaySession(sessionId: string, mode: PlayMode): Promise<boolean> {
   const session = sessions.get(sessionId);
-  if (!session || session.playing) return false;
+  if (!session) {
+    telemetry.debug("playback", "stale_session_skip", { sessionId, data: { mode } });
+    return true;
+  }
+  if (session.playing) return false;
 
   const range = selectPlaybackRange(session, mode);
   if (!range) {
@@ -760,6 +813,15 @@ async function tryPlaySession(sessionId: string, mode: PlayMode): Promise<boolea
       jitterMs: session.jitterEstimator.getJitterMs(),
     });
 
+    if (!played) {
+      session.playing = false;
+      if (session.streamingPlayback) {
+        session.streamingPlayback = false;
+        livePlaybackDepth = Math.max(0, livePlaybackDepth - 1);
+      }
+      return true;
+    }
+
     session.nextPlaySeq = range.endSeq + 1;
 
     if (isFinalSegment) {
@@ -773,7 +835,7 @@ async function tryPlaySession(sessionId: string, mode: PlayMode): Promise<boolea
       schedulePlaybackAttempt(sessionId);
     }
 
-    return played;
+    return true;
   } catch {
     session.playing = false;
     if (session.streamingPlayback) {
@@ -903,7 +965,8 @@ async function playAudioPayload(input: PlayAudioPayloadInput): Promise<boolean> 
     player.volume = 1;
     activePlayer = player;
 
-    const { durationSec } = await waitForPlaybackFinish(sessionId, player, 15000);
+    const loadTimeoutMs = Math.min(60_000, Math.max(8_000, durationMs * 2 + 5_000));
+    const { durationSec } = await waitForPlaybackFinish(sessionId, player, loadTimeoutMs);
 
     player.remove();
     if (activePlayer === player) activePlayer = null;
@@ -948,7 +1011,7 @@ async function playAudioPayload(input: PlayAudioPayloadInput): Promise<boolean> 
       activePlayer.remove();
       activePlayer = null;
     }
-    throw err;
+    return false;
   } finally {
     if (!keepPlaybackSession) {
       await restoreRecordingSession();
@@ -962,8 +1025,5 @@ export async function teardownPlayback(): Promise<void> {
   sessions.clear();
   pendingPlayQueue.length = 0;
   livePlaybackDepth = 0;
-  if (activePlayer) {
-    activePlayer.remove();
-    activePlayer = null;
-  }
+  cancelActivePlayback();
 }

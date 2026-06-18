@@ -258,7 +258,7 @@ function WalkieScreen() {
 
         case "audio_chunk":
           if (isOwnSpeaker(msg.from.name)) break;
-          if (ignoredReplaySessionsRef.current.has(msg.sessionId)) break;
+          if (msg.replay || ignoredReplaySessionsRef.current.has(msg.sessionId)) break;
           receiveChunk(msg.sessionId, msg.seq, msg.pcmBase64, msg.from).catch((err) => {
             telemetry.error("playback", "receive_chunk_failed", {
               sessionId: msg.sessionId,
