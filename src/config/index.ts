@@ -30,9 +30,6 @@ export const JITTER_MIN_PLAYOUT_MS = 300;
 export const JITTER_MAX_PLAYOUT_MS = 10_000;
 export const JITTER_MARGIN_FACTOR = 5;
 
-/** If a sequence hole persists this long after the last chunk, fill with silence and continue. */
-export const CHUNK_GAP_FILL_MS = 500;
-
 /** After ptt_end, if no new chunk arrives for this long, play what was received. Resets on each chunk. */
 export const CHUNK_ARRIVAL_GRACE_MS = 5_000;
 

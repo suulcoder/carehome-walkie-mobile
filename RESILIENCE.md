@@ -35,7 +35,7 @@ Every PTT session has a `sessionId` (nanoid) and all chunks are numbered startin
 4. If the WS was connected throughout: the session is cleaned up from the queue immediately.
 5. If the WS dropped during or before the session: on reconnect, `drainQueue` replays `ptt_start + all chunks + ptt_end` from AsyncStorage.
 
-**Live streaming**: chunks are emitted during capture (not just on release). This means receivers start hearing audio before the sender releases the button — critical on slow networks. If `ptt_end` arrives before all chunks (due to reordering), the receiver waits up to 20s before playing what it has.
+**Live streaming**: chunks are emitted during capture (not just on release). This means receivers start hearing audio before the sender releases the button — critical on slow networks. If `ptt_end` arrives before all chunks (due to reordering), the receiver waits up to 5s before playing what it has.
 
 **On reconnect:**
 - In-memory unsent sessions are replayed immediately after `joined` is received.
@@ -62,12 +62,12 @@ app start / network back → Connecting
 
 ## 5. Inbound Audio: Jitter Buffer
 
-Incoming chunks are buffered per `sessionId` and sorted by `seq` before playback. The buffer handles two timeout tiers:
+Incoming chunks are buffered per `sessionId` and sorted by `seq` before playback.
 
-- **Grace window (5s)**: waits for `ptt_end` which tells us how many chunks to expect.
-- **Gap timeout (500ms)**: if a hole in the sequence isn't filled within 500ms of the last received chunk, the gap is filled with silence and playback proceeds.
+- **Live streaming**: segments play only from contiguous chunks — no silence fill while the sender is still talking. This avoids inserting gaps when `ptt_end` arrives before late chunks on a slow link.
+- **Grace window (5s after `ptt_end`)**: once the sender releases, we know how many chunks to expect. If holes remain after 5s, missing sequences are filled with silence and playback completes.
 
-This gives smooth, full-length audio even under moderate packet loss, without stalling indefinitely on a lost packet.
+This gives smooth live audio under jitter without stalling indefinitely on a lost packet, while avoiding premature gap-fill during an active transmission.
 
 ---
 
@@ -127,4 +127,4 @@ Without this, iOS routes audio to the earpiece instead of the speaker, or the mi
 5. **Automated E2E tests**: the simulator proxy covers network-level scenarios, but a full Maestro or Detox test suite would close the loop on UI behaviour.
 6. **Reconnect jitter**: the current backoff is deterministic; adding random jitter would prevent reconnect storms after a server restart when many devices reconnect simultaneously.
 7. **Sentry / Datadog integration**: the telemetry pipeline is structured for this (every log has a level, module, and event name), but the actual forwarding hook is a TODO.
-8. **Manage queues** Tests need to be done over queue of messages comming while talking
+8. **Multi-message queue stress tests**: validate back-to-back PTT sessions queued while offline or reconnecting — e.g. three presses in a row with no network, then confirm all three replay in order on reconnect.
