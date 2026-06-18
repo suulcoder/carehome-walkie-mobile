@@ -1,8 +1,14 @@
 /**
  * Audio playback using expo-audio (Expo SDK 56, iOS + Android).
- * Buffers all chunks until ptt_end, then plays one continuous WAV when complete.
- * If chunks are still missing after ptt_end and none arrive for CHUNK_ARRIVAL_GRACE_MS,
- * plays what arrived (no silence fill). Long messages keep buffering while chunks flow in.
+ *
+ * Uses an adaptive jitter buffer (RFC 3550-style) to balance latency and quality:
+ * - Tracks inter-arrival jitter while chunks stream in.
+ * - Target playout delay scales from JITTER_MIN_PLAYOUT_MS (fast network) to
+ *   JITTER_MAX_PLAYOUT_MS (slow/jittery network).
+ * - Complete messages play as one continuous WAV (best quality).
+ * - Long live transmissions may start after the adaptive buffer fills, then drain
+ *   in segments without toggling the audio session between segments.
+ * - Missing chunks after ptt_end: CHUNK_GAP_FILL_MS silence fill, then CHUNK_ARRIVAL_GRACE_MS tail.
  */
 
 import {
@@ -12,8 +18,17 @@ import {
   type AudioPlayer,
 } from "expo-audio";
 import { File, Paths } from "expo-file-system";
-import { AUDIO_SAMPLE_RATE, CHUNK_ARRIVAL_GRACE_MS } from "../config";
+import {
+  AUDIO_SAMPLE_RATE,
+  CHUNK_ARRIVAL_GRACE_MS,
+  CHUNK_DURATION_MS,
+  CHUNK_GAP_FILL_MS,
+  JITTER_MARGIN_FACTOR,
+  JITTER_MAX_PLAYOUT_MS,
+  JITTER_MIN_PLAYOUT_MS,
+} from "../config";
 import { WALKIE_RECORDING_AUDIO_MODE } from "./capture";
+import { computePlayoutDelayMs, JitterEstimator } from "./jitterBuffer";
 import { telemetry } from "../observability";
 import {
   markInboxMessagePlayed,
@@ -24,7 +39,9 @@ import { invalidateInbox } from "../inbox/queryClient";
 import { StoredMessage } from "../inbox/types";
 import {
   base64ToBytes,
+  CHUNK_PCM_BYTES,
   concatPcmChunks,
+  concatPcmChunksWithGaps,
   measurePcmPeak,
   pcmDurationMs,
   pcmToWavBytes,
@@ -41,10 +58,18 @@ const WALKIE_PLAYBACK_AUDIO_MODE = {
   shouldRouteThroughEarpiece: false,
 };
 
+const PLAYOUT_CONFIG = {
+  minMs: JITTER_MIN_PLAYOUT_MS,
+  maxMs: JITTER_MAX_PLAYOUT_MS,
+  marginFactor: JITTER_MARGIN_FACTOR,
+};
+
 export type PlaybackWarning =
   | { type: "received_silent"; sessionId: string; peakAmplitude: number }
   | { type: "sample_rate_unknown"; sessionId: string; inferredRate: number }
   | { type: "chunks_incomplete"; sessionId: string; received: number; expected: number };
+
+type PlayMode = "complete" | "segment" | "final_partial";
 
 interface ReceiveSession {
   chunks: PcmChunk[];
@@ -57,10 +82,15 @@ interface ReceiveSession {
   completedAt?: number;
   graceTimer?: ReturnType<typeof setTimeout>;
   playing: boolean;
+  nextPlaySeq: number;
+  lastChunkAt: number;
+  jitterEstimator: JitterEstimator;
+  playoutDelayMs: number;
+  streamingPlayback: boolean;
 }
 
 type PlayQueueItem =
-  | { kind: "live"; sessionId: string; allowPartial: boolean }
+  | { kind: "live"; sessionId: string; mode: PlayMode }
   | { kind: "stored"; message: StoredMessage };
 
 const sessions = new Map<string, ReceiveSession>();
@@ -70,6 +100,7 @@ let activePlayer: AudioPlayer | null = null;
 let warningHandler: ((warning: PlaybackWarning) => void) | null = null;
 let selfDisplayName: string | null = null;
 const ownedSessionIds = new Set<string>();
+let livePlaybackDepth = 0;
 
 export function setSelfDisplayName(name: string | null): void {
   selfDisplayName = name;
@@ -108,6 +139,11 @@ function getSession(sessionId: string): ReceiveSession {
       fromName: "Unknown",
       endReceived: false,
       playing: false,
+      nextPlaySeq: 0,
+      lastChunkAt: 0,
+      jitterEstimator: new JitterEstimator(CHUNK_DURATION_MS),
+      playoutDelayMs: JITTER_MIN_PLAYOUT_MS,
+      streamingPlayback: false,
     };
     sessions.set(sessionId, session);
   }
@@ -132,45 +168,208 @@ function hasAllExpectedChunks(session: ReceiveSession): boolean {
   return uniqueChunkCount(session) >= session.expectedCount;
 }
 
+function updatePlayoutDelay(session: ReceiveSession): void {
+  session.playoutDelayMs = computePlayoutDelayMs(
+    session.jitterEstimator.getJitterMs(),
+    PLAYOUT_CONFIG
+  );
+}
+
+function getUnplayedChunks(session: ReceiveSession): PcmChunk[] {
+  return session.chunks
+    .filter((c) => c.seq >= session.nextPlaySeq)
+    .sort((a, b) => a.seq - b.seq);
+}
+
+function getUnplayedBytes(session: ReceiveSession): number {
+  return getUnplayedChunks(session).reduce(
+    (sum, chunk) => sum + base64ToBytes(chunk.pcmBase64).length,
+    0
+  );
+}
+
+function getUnplayedDurationMs(session: ReceiveSession): number {
+  return pcmDurationMs(getUnplayedBytes(session), session.sampleRate);
+}
+
+/** Contiguous audio from nextPlaySeq without gaps (no silence fill). */
+function getContiguousBufferedMs(session: ReceiveSession): number {
+  let totalBytes = 0;
+  let expectedSeq = session.nextPlaySeq;
+
+  while (true) {
+    const chunk = session.chunks.find((c) => c.seq === expectedSeq);
+    if (!chunk) break;
+    totalBytes += base64ToBytes(chunk.pcmBase64).length;
+    expectedSeq++;
+  }
+
+  return pcmDurationMs(totalBytes, session.sampleRate);
+}
+
+function gapFillAllowed(session: ReceiveSession): boolean {
+  if (!session.endReceived) return false;
+  if (session.lastChunkAt === 0) return false;
+  return Date.now() - session.lastChunkAt >= CHUNK_GAP_FILL_MS;
+}
+
+function windowPcmBytes(session: ReceiveSession): number {
+  return Math.floor(session.sampleRate * (session.playoutDelayMs / 1000) * 2);
+}
+
+interface SegmentSelection {
+  startSeq: number;
+  endSeq: number;
+  useGapFill: boolean;
+}
+
+function selectPlaybackRange(session: ReceiveSession, mode: PlayMode): SegmentSelection | null {
+  if (mode === "complete") {
+    const endSeq =
+      session.expectedCount !== undefined
+        ? session.expectedCount - 1
+        : Math.max(...session.chunks.map((c) => c.seq));
+    if (endSeq < session.nextPlaySeq) return null;
+    return { startSeq: session.nextPlaySeq, endSeq, useGapFill: false };
+  }
+
+  if (mode === "final_partial") {
+    const endSeq =
+      session.expectedCount !== undefined
+        ? session.expectedCount - 1
+        : Math.max(...session.chunks.map((c) => c.seq), session.nextPlaySeq - 1);
+    if (endSeq < session.nextPlaySeq) return null;
+    return { startSeq: session.nextPlaySeq, endSeq, useGapFill: true };
+  }
+
+  const windowBytes = windowPcmBytes(session);
+  const allowGapFill = gapFillAllowed(session);
+  let totalBytes = 0;
+  let endSeq = session.nextPlaySeq - 1;
+  let expectedSeq = session.nextPlaySeq;
+
+  while (true) {
+    const chunk = session.chunks.find((c) => c.seq === expectedSeq);
+    if (!chunk) {
+      if (allowGapFill) {
+        if (totalBytes >= windowBytes) break;
+        totalBytes += CHUNK_PCM_BYTES;
+        endSeq = expectedSeq;
+        expectedSeq++;
+        continue;
+      }
+      break;
+    }
+
+    const bytes = base64ToBytes(chunk.pcmBase64).length;
+    if (totalBytes > 0 && totalBytes + bytes > windowBytes && totalBytes >= windowBytes) {
+      break;
+    }
+
+    totalBytes += bytes;
+    endSeq = expectedSeq;
+    expectedSeq++;
+
+    if (totalBytes >= windowBytes) break;
+  }
+
+  if (endSeq < session.nextPlaySeq) return null;
+  return { startSeq: session.nextPlaySeq, endSeq, useGapFill: allowGapFill };
+}
+
+function cleanupSession(sessionId: string, session: ReceiveSession): void {
+  clearSessionTimers(session);
+  sessions.delete(sessionId);
+}
+
+function finishSession(sessionId: string, session: ReceiveSession, success: boolean, reason?: string): void {
+  cleanupSession(sessionId, session);
+  telemetry.sessionDone(sessionId, success, reason);
+}
+
 function schedulePlaybackAttempt(sessionId: string): void {
   const session = sessions.get(sessionId);
   if (!session || session.playing) return;
 
-  if (hasAllExpectedChunks(session)) {
+  updatePlayoutDelay(session);
+
+  const unplayedMs = getUnplayedDurationMs(session);
+  const contiguousMs = getContiguousBufferedMs(session);
+  const allReceived = hasAllExpectedChunks(session);
+
+  if (session.endReceived && unplayedMs === 0 && allReceived) {
+    finishSession(sessionId, session, true);
+    return;
+  }
+
+  // Start streaming once the adaptive buffer has enough contiguous audio.
+  if (contiguousMs >= session.playoutDelayMs) {
     clearSessionTimers(session);
-    enqueuePlayback(sessionId);
+    enqueuePlayback(sessionId, "segment");
+    return;
+  }
+
+  // Short remainder after ptt_end (all chunks already in buffer).
+  if (session.endReceived && unplayedMs > 0 && allReceived) {
+    clearSessionTimers(session);
+    enqueuePlayback(sessionId, "final_partial");
     return;
   }
 
   if (!session.endReceived) return;
 
+  if (unplayedMs > 0 && gapFillAllowed(session)) {
+    enqueuePlayback(sessionId, "final_partial");
+    return;
+  }
+
   clearSessionTimers(session);
   session.graceTimer = setTimeout(() => {
     session.graceTimer = undefined;
-    if (session.playing || hasAllExpectedChunks(session)) return;
-    if (session.chunks.length === 0) return;
+    if (session.playing) return;
+
+    const remainingMs = getUnplayedDurationMs(session);
+    if (remainingMs === 0) {
+      finishSession(sessionId, session, true);
+      return;
+    }
+
+    if (hasAllExpectedChunks(session)) {
+      enqueuePlayback(sessionId, "final_partial");
+      return;
+    }
 
     telemetry.warn("playback", "chunk_grace_timeout", {
       sessionId,
       data: {
         expected: session.expectedCount,
         received: uniqueChunkCount(session),
+        playoutDelayMs: session.playoutDelayMs,
+        jitterMs: session.jitterEstimator.getJitterMs(),
         idleMs: CHUNK_ARRIVAL_GRACE_MS,
       },
-      message: "No new chunks since grace window — playing received chunks only",
+      message: "No new chunks since grace window — playing received chunks with gap fill",
     });
-    enqueuePlayback(sessionId, true);
+    enqueuePlayback(sessionId, "final_partial");
   }, CHUNK_ARRIVAL_GRACE_MS);
 }
 
-function enqueuePlayback(sessionId: string, allowPartial = false): void {
+function enqueuePlayback(sessionId: string, mode: PlayMode): void {
+  const MODE_PRIORITY: Record<PlayMode, number> = {
+    segment: 0,
+    final_partial: 1,
+    complete: 2,
+  };
+
   const existing = pendingPlayQueue.find(
     (item) => item.kind === "live" && item.sessionId === sessionId
   );
   if (existing && existing.kind === "live") {
-    if (allowPartial) existing.allowPartial = true;
+    if (MODE_PRIORITY[mode] > MODE_PRIORITY[existing.mode]) {
+      existing.mode = mode;
+    }
   } else {
-    pendingPlayQueue.push({ kind: "live", sessionId, allowPartial });
+    pendingPlayQueue.push({ kind: "live", sessionId, mode });
   }
   startDrainPlaybackQueue();
 }
@@ -198,7 +397,7 @@ async function drainPlaybackQueue(): Promise<void> {
     const item = pendingPlayQueue[0];
     const played =
       item.kind === "live"
-        ? await tryPlaySession(item.sessionId, item.allowPartial)
+        ? await tryPlaySession(item.sessionId, item.mode)
         : await tryPlayStoredMessage(item.message);
     if (!played) break;
     pendingPlayQueue.shift();
@@ -230,6 +429,11 @@ export function beginReceiveSession(
     endReceivedAt: existing?.endReceivedAt,
     completedAt: existing?.completedAt,
     playing: false,
+    nextPlaySeq: existing?.nextPlaySeq ?? 0,
+    lastChunkAt: existing?.lastChunkAt ?? 0,
+    jitterEstimator: existing?.jitterEstimator ?? new JitterEstimator(CHUNK_DURATION_MS),
+    playoutDelayMs: existing?.playoutDelayMs ?? JITTER_MIN_PLAYOUT_MS,
+    streamingPlayback: existing?.streamingPlayback ?? false,
   });
   telemetry.session("receiver", sessionId, { peerName: from?.name, status: "active" });
   telemetry.info("playback", "session_begin", {
@@ -262,6 +466,9 @@ export async function receiveChunk(
   }
   if (!session.chunks.some((c) => c.seq === seq)) {
     session.chunks.push({ seq, pcmBase64 });
+    session.lastChunkAt = Date.now();
+    session.jitterEstimator.onChunkArrival(session.lastChunkAt);
+    updatePlayoutDelay(session);
     telemetry.metric("audioChunksReceived");
 
     if (seq === 0) {
@@ -278,6 +485,8 @@ export async function receiveChunk(
         seq,
         totalBuffered: uniqueChunkCount(session),
         expected: session.expectedCount,
+        playoutDelayMs: session.playoutDelayMs,
+        jitterMs: session.jitterEstimator.getJitterMs(),
         base64Len: pcmBase64.length,
       },
     });
@@ -320,6 +529,7 @@ export async function endSession(
   }
 
   const received = uniqueChunkCount(session);
+  updatePlayoutDelay(session);
 
   if (expectedChunkCount === 0) {
     telemetry.warn("playback", "sender_had_no_audio", { sessionId });
@@ -336,6 +546,8 @@ export async function endSession(
         expected: expectedChunkCount,
         received,
         sampleRate,
+        playoutDelayMs: session.playoutDelayMs,
+        jitterMs: session.jitterEstimator.getJitterMs(),
         graceMs: CHUNK_ARRIVAL_GRACE_MS,
       },
     });
@@ -343,7 +555,13 @@ export async function endSession(
 
   telemetry.info("playback", "session_end_received", {
     sessionId,
-    data: { bufferedChunks: received, sampleRate, expectedChunkCount },
+    data: {
+      bufferedChunks: received,
+      sampleRate,
+      expectedChunkCount,
+      playoutDelayMs: session.playoutDelayMs,
+      jitterMs: session.jitterEstimator.getJitterMs(),
+    },
   });
 
   schedulePlaybackAttempt(sessionId);
@@ -366,8 +584,9 @@ function safeDeleteFile(file: File): void {
   }
 }
 
-async function writeWavToCache(sessionId: string, wavBytes: Uint8Array): Promise<File> {
-  const file = new File(Paths.cache, "walkie-playback", `${sessionId}.wav`);
+async function writeWavToCache(sessionId: string, wavBytes: Uint8Array, suffix?: string): Promise<File> {
+  const name = suffix ? `${sessionId}-${suffix}.wav` : `${sessionId}.wav`;
+  const file = new File(Paths.cache, "walkie-playback", name);
   if (file.exists) file.delete();
   file.create({ overwrite: true, intermediates: true });
   file.write(wavBytes);
@@ -423,36 +642,47 @@ async function waitForPlaybackFinish(
 }
 
 async function tryPlayStoredMessage(message: StoredMessage): Promise<boolean> {
+  const pcm = concatPcmChunks(message.chunks);
   return playAudioPayload({
     sessionId: message.sessionId,
-    chunks: message.chunks,
+    pcm,
     sampleRate: message.sampleRate,
     completedAt: message.completedAt,
     fromId: message.fromId,
     fromName: message.fromName,
     chunkCount: message.chunkCount,
-    allowPartial: false,
     isManualReplay: true,
+    isFinalSegment: true,
+    inboxChunks: message.chunks,
+    playMode: "complete",
+    gapsFilled: 0,
   });
 }
 
-async function tryPlaySession(sessionId: string, allowPartial = false): Promise<boolean> {
+async function tryPlaySession(sessionId: string, mode: PlayMode): Promise<boolean> {
   const session = sessions.get(sessionId);
   if (!session || session.playing) return false;
 
-  if (session.chunks.length === 0) {
-    telemetry.debug("playback", "waiting_for_chunks", { sessionId });
+  const range = selectPlaybackRange(session, mode);
+  if (!range) {
+    telemetry.debug("playback", "waiting_for_buffer", {
+      sessionId,
+      data: {
+        mode,
+        playoutDelayMs: session.playoutDelayMs,
+        contiguousMs: getContiguousBufferedMs(session),
+        unplayedMs: getUnplayedDurationMs(session),
+      },
+    });
     return false;
   }
 
   const received = uniqueChunkCount(session);
   const expected = session.expectedCount;
+  const isFinalSegment = mode === "complete" || mode === "final_partial";
+  const allowPartial = mode === "final_partial";
 
-  if (expected !== undefined && received < expected && !allowPartial) {
-    return false;
-  }
-
-  if (expected !== undefined && received < expected && allowPartial) {
+  if (allowPartial && expected !== undefined && received < expected) {
     emitWarning({
       type: "chunks_incomplete",
       sessionId,
@@ -461,57 +691,143 @@ async function tryPlaySession(sessionId: string, allowPartial = false): Promise<
     });
   }
 
+  const segmentChunks = session.chunks.filter(
+    (c) => c.seq >= range.startSeq && c.seq <= range.endSeq
+  );
+  const seqCount = range.endSeq - range.startSeq + 1;
+
+  let pcm: Uint8Array;
+  let gapsFilled = 0;
+
+  if (range.useGapFill && seqCount > 0) {
+    const gapResult = concatPcmChunksWithGaps(
+      segmentChunks,
+      seqCount,
+      session.sampleRate
+    );
+    pcm = gapResult.pcm;
+    gapsFilled = gapResult.gapsFilled;
+    if (gapsFilled > 0) {
+      telemetry.info("playback", "gaps_filled_with_silence", {
+        sessionId,
+        data: { gapsFilled, startSeq: range.startSeq, endSeq: range.endSeq },
+      });
+    }
+  } else {
+    pcm = concatPcmChunks(segmentChunks);
+  }
+
+  if (pcm.length === 0) {
+    return false;
+  }
+
+  const segmentMs = pcmDurationMs(pcm.length, session.sampleRate);
+  if (mode === "segment" && segmentMs < session.playoutDelayMs * 0.5) {
+    return false;
+  }
+
   session.playing = true;
   clearSessionTimers(session);
 
+  if (mode === "segment") {
+    session.streamingPlayback = true;
+    livePlaybackDepth++;
+  }
+
   const sampleRate = session.sampleRate;
   const completedAt = session.completedAt;
-  const chunks = [...session.chunks];
   const fromId = session.fromId;
   const fromName = session.fromName;
-  sessions.delete(sessionId);
+  const inboxChunks = [...session.chunks];
+  const segmentSuffix = `${range.startSeq}-${range.endSeq}`;
 
-  return playAudioPayload({
-    sessionId,
-    chunks,
-    sampleRate,
-    completedAt,
-    fromId,
-    fromName,
-    chunkCount: expected ?? received,
-    allowPartial,
-    isManualReplay: false,
-  });
+  try {
+    const played = await playAudioPayload({
+      sessionId,
+      pcm,
+      sampleRate,
+      completedAt,
+      fromId,
+      fromName,
+      chunkCount: expected ?? received,
+      isManualReplay: false,
+      isFinalSegment,
+      inboxChunks,
+      segmentSuffix: isFinalSegment && mode !== "complete" ? segmentSuffix : undefined,
+      playMode: mode,
+      gapsFilled,
+      playoutDelayMs: session.playoutDelayMs,
+      jitterMs: session.jitterEstimator.getJitterMs(),
+    });
+
+    session.nextPlaySeq = range.endSeq + 1;
+
+    if (isFinalSegment) {
+      if (session.streamingPlayback) {
+        session.streamingPlayback = false;
+        livePlaybackDepth = Math.max(0, livePlaybackDepth - 1);
+      }
+      cleanupSession(sessionId, session);
+    } else {
+      session.playing = false;
+      schedulePlaybackAttempt(sessionId);
+    }
+
+    return played;
+  } catch {
+    session.playing = false;
+    if (session.streamingPlayback) {
+      session.streamingPlayback = false;
+      livePlaybackDepth = Math.max(0, livePlaybackDepth - 1);
+    }
+    if (isFinalSegment) {
+      cleanupSession(sessionId, session);
+    }
+    return true;
+  }
 }
 
 interface PlayAudioPayloadInput {
   sessionId: string;
-  chunks: PcmChunk[];
+  pcm: Uint8Array;
   sampleRate: number;
   completedAt?: number;
   fromId: string;
   fromName: string;
   chunkCount: number;
-  allowPartial: boolean;
   isManualReplay: boolean;
+  isFinalSegment: boolean;
+  inboxChunks?: PcmChunk[];
+  segmentSuffix?: string;
+  playMode: PlayMode | "stored";
+  gapsFilled: number;
+  playoutDelayMs?: number;
+  jitterMs?: number;
 }
 
 async function playAudioPayload(input: PlayAudioPayloadInput): Promise<boolean> {
   const {
     sessionId,
-    chunks,
+    pcm,
     sampleRate,
     completedAt,
     fromId,
     fromName,
     chunkCount,
-    allowPartial,
     isManualReplay,
+    isFinalSegment,
+    inboxChunks,
+    segmentSuffix,
+    playMode,
+    gapsFilled,
+    playoutDelayMs,
+    jitterMs,
   } = input;
 
   telemetry.metric("playbackAttempts");
 
   let tempFile: File | null = null;
+  const keepPlaybackSession = !isFinalSegment && livePlaybackDepth > 0;
 
   try {
     if (activePlayer) {
@@ -519,20 +835,23 @@ async function playAudioPayload(input: PlayAudioPayloadInput): Promise<boolean> 
       activePlayer = null;
     }
 
-    const pcm = concatPcmChunks(chunks);
-
     if (pcm.length === 0) {
-      telemetry.warn("playback", "empty_pcm_after_concat", { sessionId });
+      telemetry.warn("playback", "empty_pcm", { sessionId });
       telemetry.metric("playbackFailures");
-      telemetry.sessionDone(sessionId, false, "empty_pcm");
+      if (isFinalSegment) {
+        telemetry.sessionDone(sessionId, false, "empty_pcm");
+      }
       return true;
     }
 
     const peakAmplitude = measurePcmPeak(pcm);
     const durationMs = pcmDurationMs(pcm.length, sampleRate);
-    const received = new Set(chunks.map((c) => c.seq)).size;
 
-    if (!isManualReplay) {
+    if (!isManualReplay && isFinalSegment && inboxChunks) {
+      const fullDurationMs = pcmDurationMs(
+        inboxChunks.reduce((sum, c) => sum + base64ToBytes(c.pcmBase64).length, 0),
+        sampleRate
+      );
       await upsertInboxMessage({
         sessionId,
         fromId,
@@ -540,8 +859,8 @@ async function playAudioPayload(input: PlayAudioPayloadInput): Promise<boolean> 
         completedAt: completedAt ?? Date.now(),
         sampleRate,
         chunkCount,
-        chunks,
-        durationMs,
+        chunks: inboxChunks,
+        durationMs: fullDurationMs,
       });
       invalidateInbox();
     }
@@ -549,7 +868,7 @@ async function playAudioPayload(input: PlayAudioPayloadInput): Promise<boolean> 
     if (peakAmplitude < SILENT_PEAK_THRESHOLD) {
       telemetry.warn("playback", "low_peak_audio", {
         sessionId,
-        data: { peakAmplitude, received, expected: chunkCount, allowPartial },
+        data: { peakAmplitude, expected: chunkCount, playMode, gapsFilled },
         message: "Low PCM peak — playing anyway (may be silent sender or partial buffer)",
       });
       telemetry.metric("playbackSilentReceived");
@@ -557,19 +876,21 @@ async function playAudioPayload(input: PlayAudioPayloadInput): Promise<boolean> 
     }
 
     const wavBytes = pcmToWavBytes(pcm, sampleRate);
-    tempFile = await writeWavToCache(sessionId, wavBytes);
+    tempFile = await writeWavToCache(sessionId, wavBytes, segmentSuffix);
 
     telemetry.info("playback", "play_start", {
       sessionId,
       data: {
-        chunks: received,
-        expected: chunkCount,
+        playMode,
         pcmBytes: pcm.length,
         sampleRate,
         peakAmplitude,
         durationMs,
-        allowPartial,
-        isManualReplay,
+        isFinalSegment,
+        gapsFilled,
+        playoutDelayMs,
+        jitterMs,
+        segmentSuffix,
       },
     });
 
@@ -593,34 +914,45 @@ async function playAudioPayload(input: PlayAudioPayloadInput): Promise<boolean> 
       pcmBytes: pcm.length,
       peakAmplitude,
       sampleRate,
-      status: "completed",
+      status: isFinalSegment ? "completed" : "segment",
+      playoutDelayMs,
+      jitterMs,
+      gapsFilled,
     });
-    telemetry.sessionDone(sessionId, true);
+    if (isFinalSegment) {
+      telemetry.sessionDone(sessionId, true);
+    }
     telemetry.info("playback", "play_finished", {
       sessionId,
-      data: { durationSec, peakAmplitude, allowPartial, isManualReplay },
+      data: { durationSec, peakAmplitude, isFinalSegment, playMode, gapsFilled },
     });
 
-    const playedAt = Date.now();
-    if (isManualReplay) {
-      await markInboxMessageReplayed(sessionId);
-    } else {
-      await markInboxMessagePlayed(sessionId, playedAt);
+    if (isFinalSegment) {
+      const playedAt = Date.now();
+      if (isManualReplay) {
+        await markInboxMessageReplayed(sessionId);
+      } else {
+        await markInboxMessagePlayed(sessionId, playedAt);
+      }
+      invalidateInbox();
     }
-    invalidateInbox();
     return true;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     telemetry.error("playback", "play_failed", { sessionId, data: { error: message } });
     telemetry.metric("playbackFailures");
-    telemetry.sessionDone(sessionId, false, message);
+    if (isFinalSegment) {
+      telemetry.sessionDone(sessionId, false, message);
+    }
     if (activePlayer) {
       activePlayer.remove();
       activePlayer = null;
     }
-    return true;
+    throw err;
   } finally {
-    await restoreRecordingSession();
+    if (!keepPlaybackSession) {
+      await restoreRecordingSession();
+    }
     if (tempFile) safeDeleteFile(tempFile);
   }
 }
@@ -629,6 +961,7 @@ export async function teardownPlayback(): Promise<void> {
   sessions.forEach(clearSessionTimers);
   sessions.clear();
   pendingPlayQueue.length = 0;
+  livePlaybackDepth = 0;
   if (activePlayer) {
     activePlayer.remove();
     activePlayer = null;

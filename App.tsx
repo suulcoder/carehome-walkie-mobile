@@ -18,6 +18,7 @@ import { nanoid } from "nanoid/non-secure";
 import { WsClient, ConnectionState } from "./src/network/wsClient";
 import { ServerMessage, PeerInfo } from "./src/network/protocol";
 import { requestMicPermission, startCapture, stopCapture } from "./src/audio/capture";
+import { PcmChunk } from "./src/audio/pcmUtils";
 import {
   initPlayback,
   receiveChunk,
@@ -86,6 +87,7 @@ function WalkieScreen() {
 
   const wsRef = useRef<WsClient | null>(null);
   const activePttSession = useRef<string | null>(null);
+  const outboundChunksRef = useRef<PcmChunk[]>([]);
   const isTalkingRef = useRef(false);
   const ignoredReplaySessionsRef = useRef<Set<string>>(new Set());
   const { show: showToast, ToastView } = useToast();
@@ -335,11 +337,15 @@ function WalkieScreen() {
     setIsTalking(true);
 
     wsRef.current.sendPttStart(sessionId);
+    outboundChunksRef.current = [];
 
     try {
-      // Batch mode: audio is sent only after PTT release so receivers play one
-      // complete message (better quality on slow/unreliable networks).
-      await startCapture(sessionId);
+      await startCapture(sessionId, (chunk) => {
+        outboundChunksRef.current.push(chunk);
+        if (wsRef.current && activePttSession.current === sessionId) {
+          wsRef.current.sendAudioChunk(sessionId, chunk.seq, chunk.pcmBase64);
+        }
+      });
     } catch (err) {
       telemetry.error("app", "capture_start_failed", {
         sessionId,
@@ -376,13 +382,18 @@ function WalkieScreen() {
       });
       showToast("No audio captured — hold longer or check mic");
     } else {
-      if (displayName && capture.chunks.length > 0) {
+      const outboundChunks =
+        outboundChunksRef.current.length > 0
+          ? outboundChunksRef.current
+          : capture.chunks;
+
+      if (displayName && outboundChunks.length > 0) {
         await recordOutboundMessage({
           sessionId,
           senderName: displayName,
           sampleRate: capture.sampleRate,
           chunkCount: capture.chunksSent,
-          chunks: capture.chunks,
+          chunks: outboundChunks,
           durationMs: capture.durationMs,
         });
         invalidateInbox();
@@ -401,6 +412,7 @@ function WalkieScreen() {
     }
 
     wsRef.current.sendPttEnd(sessionId, capture.sampleRate, capture.chunksSent);
+    outboundChunksRef.current = [];
   };
 
   // ─── Render ─────────────────────────────────────────────────────────────────
