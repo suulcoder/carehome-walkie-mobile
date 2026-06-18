@@ -34,9 +34,13 @@
       "favicon": "./assets/favicon.png"
     },
     "plugins": [
-      "react-native-haptic-feedback",
       "expo-audio",
       "./plugins/withAndroidMetroHost"
-    ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "a36621cf-e394-4224-9812-0a9da601119f"
+      }
+    }
   }
 }

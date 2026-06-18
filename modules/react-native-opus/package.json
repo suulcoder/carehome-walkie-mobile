@@ -1,0 +1,25 @@
+{
+  "name": "react-native-opus",
+  "version": "0.3.1",
+  "description": "Native Opus decode turbo module (vendored — npm publish had broken deps)",
+  "main": "./lib/commonjs/index.js",
+  "module": "./lib/module/index.js",
+  "types": "./lib/typescript/src/index.d.ts",
+  "react-native": "./src/index.tsx",
+  "codegenConfig": {
+    "name": "RNOpusTurboSpec",
+    "type": "modules",
+    "jsSrcsDir": "src"
+  },
+  "peerDependencies": {
+    "react": "*",
+    "react-native": "*"
+  },
+  "license": "MIT",
+  "homepage": "https://github.com/Aduomas/react-native-opus",
+  "author": "Adomas Valiukevicius",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Aduomas/react-native-opus.git"
+  }
+}

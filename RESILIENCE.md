@@ -64,7 +64,7 @@ app start / network back → Connecting
 
 Incoming chunks are buffered per `sessionId` and sorted by `seq` before playback. The buffer handles two timeout tiers:
 
-- **Grace window (20s)**: waits for `ptt_end` which tells us how many chunks to expect.
+- **Grace window (5s)**: waits for `ptt_end` which tells us how many chunks to expect.
 - **Gap timeout (500ms)**: if a hole in the sequence isn't filled within 500ms of the last received chunk, the gap is filled with silence and playback proceeds.
 
 This gives smooth, full-length audio even under moderate packet loss, without stalling indefinitely on a lost packet.
@@ -114,16 +114,16 @@ Without this, iOS routes audio to the earpiece instead of the speaker, or the mi
 | Active speaker list | Shows who is transmitting so caregivers know the message is from a colleague. |
 | Toast on peer join | Lightweight awareness of who is on the channel without interrupting the main flow. |
 | Tap name to edit | Name is visible in the header and tappable to change — no buried settings screen. |
+| Message replay (Recent Messages) | Live playback must start immediately under network jitter, so a message can sound choppy or corrupted on a slow connection. Every received session is kept locally; tapping replay plays the full stored audio as one continuous clip — no live buffer, no gap fill — so caregivers can hear it clearly once the network settles. |
 
 ---
 
 ## 10. What I'd Do Differently With More Time
 
 1. **Opus encoding** instead of raw PCM16: would reduce bandwidth by ~4–8×, critical for very slow networks.
-2. **Server-side message persistence**: store the last N sessions so a device joining mid-conversation can replay what it missed.
+2. **Push notifications for missed messages**: server history and replay already cover late joiners in the foreground, but a backgrounded device still misses live audio entirely; a local notification with tap-to-replay would close that gap without requiring a full foreground service.
 3. **Android foreground service**: currently the WS connection pauses when the app is fully backgrounded on Android; a foreground service with a persistent notification would keep it alive for truly 24/7 operation.
 4. **Multi-channel support**: the hardcoded `carehome-1` channel is intentional for the challenge; real deployment would need a channel picker and server-side rooms.
 5. **Automated E2E tests**: the simulator proxy covers network-level scenarios, but a full Maestro or Detox test suite would close the loop on UI behaviour.
-6. **Accessibility**: larger tap targets, VoiceOver/TalkBack labels, high-contrast mode for low-vision caregivers.
-7. **Reconnect jitter**: the current backoff is deterministic; adding random jitter would prevent reconnect storms after a server restart when many devices reconnect simultaneously.
-8. **Sentry / Datadog integration**: the telemetry pipeline is structured for this (every log has a level, module, and event name), but the actual forwarding hook is a TODO.
+6. **Reconnect jitter**: the current backoff is deterministic; adding random jitter would prevent reconnect storms after a server restart when many devices reconnect simultaneously.
+7. **Sentry / Datadog integration**: the telemetry pipeline is structured for this (every log has a level, module, and event name), but the actual forwarding hook is a TODO.
