@@ -1,5 +1,4 @@
 import { INBOX_MAX_AGE_MS } from "../../config";
-import type { AudioCodec } from "../../config";
 import { PcmChunk } from "../../services/audio/pcmUtils";
 
 /** Returns true if a message completed within the configured recent-messages window. */
@@ -16,8 +15,6 @@ export interface ServerHistoryEntry {
   chunkCount: number;
   chunks: PcmChunk[];
   durationMs: number;
-  /** Wire codec from server; decoded to PCM before persisting locally. */
-  codec?: AudioCodec;
 }
 
 export interface StoredMessage {

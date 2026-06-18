@@ -10,7 +10,6 @@ import {
   RECONNECT_MAX_MS,
   PING_INTERVAL_MS,
   PING_TIMEOUT_MS,
-  type AudioCodec,
 } from "../../config";
 import { telemetry } from "../../lib/observability";
 import { ClientMessage, ServerMessage, PeerInfo } from "./protocol";
@@ -23,7 +22,6 @@ import {
 } from "../../lib/queue/outboundQueue";
 import { getReceiveSince } from "../../features/inbox/inboxRepository";
 import { registerOwnedSession } from "../audio/playback";
-import { wireCodec } from "../audio/opusCodec";
 
 export type ConnectionState = "disconnected" | "connecting" | "connected" | "reconnecting";
 
@@ -223,7 +221,7 @@ export class WsClient {
 
   sendPttStart(sessionId: string): void {
     registerOwnedSession(sessionId);
-    const session: QueuedSession = { sessionId, chunks: [], ended: false, codec: wireCodec() };
+    const session: QueuedSession = { sessionId, chunks: [], ended: false };
     this.activeSessions.set(sessionId, session);
     telemetry.metric("pttSessionsStarted");
     telemetry.session("sender", sessionId, { status: "active" });
@@ -231,24 +229,18 @@ export class WsClient {
     this.send({ type: "ptt_start", sessionId });
   }
 
-  sendAudioChunk(
-    sessionId: string,
-    seq: number,
-    payloadBase64: string,
-    codec: AudioCodec = wireCodec()
-  ): void {
+  sendAudioChunk(sessionId: string, seq: number, pcmBase64: string): void {
     const session = this.activeSessions.get(sessionId);
     if (session) {
-      session.codec = codec;
-      session.chunks.push({ seq, pcmBase64: payloadBase64, codec });
+      session.chunks.push({ seq, pcmBase64 });
       enqueueChunk(session);
     }
     telemetry.metric("audioChunksSent");
     telemetry.debug("ws", "audio_chunk_sent", {
       sessionId,
-      data: { seq, base64Len: payloadBase64.length, codec },
+      data: { seq, base64Len: pcmBase64.length },
     });
-    this.send({ type: "audio_chunk", sessionId, seq, pcmBase64: payloadBase64, codec });
+    this.send({ type: "audio_chunk", sessionId, seq, pcmBase64 });
   }
 
   private async sendJoin(): Promise<void> {
@@ -256,24 +248,22 @@ export class WsClient {
     this.send({ type: "join", name: this.displayName, channel: CHANNEL, since });
   }
 
-  sendPttEnd(sessionId: string, sampleRate?: number, chunkCount?: number, codec?: AudioCodec): void {
+  sendPttEnd(sessionId: string, sampleRate?: number, chunkCount?: number): void {
     const session = this.activeSessions.get(sessionId);
-    const wire = codec ?? session?.codec ?? wireCodec();
     const chunks = session?.chunks.length ?? chunkCount ?? 0;
     if (session) {
       session.ended = true;
       session.sampleRate = sampleRate;
       session.chunkCount = chunks;
-      session.codec = wire;
       void markSessionEnded(session);
     }
     telemetry.metric("pttSessionsSent");
     telemetry.info("ws", "ptt_end_sent", {
       sessionId,
-      data: { chunkCount: chunks, sampleRate, codec: wire },
+      data: { chunkCount: chunks, sampleRate },
     });
     telemetry.session("sender", sessionId, { chunksSent: chunks, sampleRate });
-    this.send({ type: "ptt_end", sessionId, sampleRate, chunkCount: chunks, codec: wire });
+    this.send({ type: "ptt_end", sessionId, sampleRate, chunkCount: chunks });
 
     if (this.state === "connected") {
       this.ackedSessions.add(sessionId);
@@ -296,7 +286,6 @@ export class WsClient {
       sessionId: session.sessionId,
       sampleRate: session.sampleRate,
       chunkCount: session.chunkCount ?? session.chunks.length,
-      codec: session.codec,
     });
   }
 
@@ -314,7 +303,6 @@ export class WsClient {
             sessionId: session.sessionId,
             seq: chunk.seq,
             pcmBase64: chunk.pcmBase64,
-            codec: chunk.codec ?? session.codec,
           });
         }
         this.sendPttEndForQueued(session);
@@ -332,7 +320,6 @@ export class WsClient {
             sessionId: session.sessionId,
             seq: chunk.seq,
             pcmBase64: chunk.pcmBase64,
-            codec: chunk.codec ?? session.codec,
           });
         }
         this.sendPttEndForQueued(session);

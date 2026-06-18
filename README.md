@@ -52,7 +52,6 @@ Restart Metro after editing `.env.local`.
 | | `local` | Connect to a relay server on your laptop (`:8080`) |
 | | `network_simulator` | Connect through the resilience proxy on your laptop (`:9090`) |
 | `EXPO_PUBLIC_DEV_MACHINE_HOST` | Your LAN IP, e.g. `192.168.1.42` | **Required on physical devices** when using `local` or `network_simulator`. Not needed on emulators/simulators. |
-| `EXPO_PUBLIC_AUDIO_CODEC` | `opus` *(default)* \| `pcm` | Wire codec for audio chunks |
 | `EXPO_PUBLIC_SHOW_DEBUG_TELEMETRY` | `true` | Show the in-app debug panel (dev builds only) |
 
 ### How URLs are resolved

@@ -22,22 +22,6 @@ export const AUDIO_SAMPLE_RATE = 16_000; // 16 kHz mono PCM16 — low bandwidth
 /** ~20 ms per outbound/inbound audio chunk at 16 kHz. */
 export const CHUNK_DURATION_MS = 20;
 
-/** Wire codec: opus (~9× smaller chunks) or legacy pcm16 base64. */
-export type AudioCodec = "pcm" | "opus";
-
-/** Active codec for outbound audio_chunk payloads. Override: EXPO_PUBLIC_AUDIO_CODEC=pcm */
-export const AUDIO_CODEC: AudioCodec =
-  process.env.EXPO_PUBLIC_AUDIO_CODEC === "pcm" ? "pcm" : "opus";
-
-/** Opus VOIP bitrate — 24 kbps is excellent for speech at 16 kHz. */
-export const OPUS_BITRATE = 24_000;
-
-/** Opus 1.6 DRED recovery window (ms) — helps on lossy Wi‑Fi. */
-export const OPUS_DRED_DURATION_MS = 100;
-
-/** PCM samples per ~20 ms frame at 16 kHz (must match capture chunk size). */
-export const OPUS_FRAME_SAMPLES = Math.floor(AUDIO_SAMPLE_RATE * (CHUNK_DURATION_MS / 1000));
-
 /**
  * Adaptive jitter buffer (VoIP-style playout delay).
  * Good network → near minMs (~300 ms). High jitter → grows toward maxMs (~1.5 s).

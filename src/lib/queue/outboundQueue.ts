@@ -6,15 +6,12 @@
  */
 
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import type { AudioCodec } from "../../config";
 
 const QUEUE_KEY_PREFIX = "ptt_queue_";
 
 export interface QueuedChunk {
   seq: number;
-  /** PCM or Opus payload on the wire (field name kept for backward compat). */
   pcmBase64: string;
-  codec?: AudioCodec;
 }
 
 export interface QueuedSession {
@@ -23,7 +20,6 @@ export interface QueuedSession {
   ended: boolean;
   sampleRate?: number;
   chunkCount?: number;
-  codec?: AudioCodec;
 }
 
 async function persistSession(session: QueuedSession): Promise<void> {

@@ -16,16 +16,8 @@ import { nanoid } from "nanoid/non-secure";
 
 import { WsClient, ConnectionState } from "../services/websocket/wsClient";
 import { ServerMessage, PeerInfo } from "../services/websocket/protocol";
-import { requestMicPermission, startCapture, stopCapture, WireChunk } from "../services/audio/capture";
+import { requestMicPermission, startCapture, stopCapture } from "../services/audio/capture";
 import { PcmChunk } from "../services/audio/pcmUtils";
-import {
-  createReceiveDecoder,
-  decodeWireChunk,
-  decodeWireChunksToPcm,
-  destroyReceiveDecoder,
-  pcmToWireChunk,
-} from "../services/audio/opusCodec";
-import { base64ToBytes } from "../services/audio/pcmUtils";
 import {
   initPlayback,
   receiveChunk,
@@ -100,7 +92,7 @@ export function WalkieScreen() {
 
   const wsRef = useRef<WsClient | null>(null);
   const activePttSession = useRef<string | null>(null);
-  const outboundChunksRef = useRef<WireChunk[]>([]);
+  const outboundChunksRef = useRef<PcmChunk[]>([]);
   const isTalkingRef = useRef(false);
   const ignoredReplaySessionsRef = useRef<Set<string>>(new Set());
   const { show: showToast, ToastView } = useToast();
@@ -266,19 +258,16 @@ export function WalkieScreen() {
           setActiveSpeaker(msg.from.id);
           showToast(`${msg.from.name} is speaking`);
           telemetry.metric("pttSessionsReceived");
-          void createReceiveDecoder(msg.sessionId);
           beginReceiveSession(msg.sessionId, msg.from);
           break;
 
         case "audio_chunk":
           if (isOwnSpeaker(msg.from.name)) break;
           if (msg.replay || ignoredReplaySessionsRef.current.has(msg.sessionId)) break;
-          void decodeWireChunk(msg.sessionId, msg.pcmBase64, msg.codec).then((pcmBase64) => {
-            receiveChunk(msg.sessionId, msg.seq, pcmBase64, msg.from).catch((err) => {
-              telemetry.error("playback", "receive_chunk_failed", {
-                sessionId: msg.sessionId,
-                data: { error: err instanceof Error ? err.message : String(err) },
-              });
+          receiveChunk(msg.sessionId, msg.seq, msg.pcmBase64, msg.from).catch((err) => {
+            telemetry.error("playback", "receive_chunk_failed", {
+              sessionId: msg.sessionId,
+              data: { error: err instanceof Error ? err.message : String(err) },
             });
           });
           break;
@@ -301,7 +290,6 @@ export function WalkieScreen() {
               data: { error: err instanceof Error ? err.message : String(err) },
             });
           });
-          void destroyReceiveDecoder(msg.sessionId);
           if (!msg.replay) {
             setActiveSpeaker((prev) => (prev === msg.from.id ? null : prev));
           }
@@ -357,10 +345,10 @@ export function WalkieScreen() {
     outboundChunksRef.current = [];
 
     try {
-      await startCapture(sessionId, (wire) => {
-        outboundChunksRef.current.push(wire);
+      await startCapture(sessionId, (chunk) => {
+        outboundChunksRef.current.push(chunk);
         if (wsRef.current && activePttSession.current === sessionId) {
-          wsRef.current.sendAudioChunk(sessionId, wire.seq, wire.payloadBase64, wire.codec);
+          wsRef.current.sendAudioChunk(sessionId, chunk.seq, chunk.pcmBase64);
         }
       });
     } catch (err) {
@@ -399,38 +387,25 @@ export function WalkieScreen() {
       });
       showToast("No audio captured — hold longer or check mic");
     } else {
-      const wireChunks =
+      const outboundChunks =
         outboundChunksRef.current.length > 0
           ? outboundChunksRef.current
-          : (capture.wireChunks ?? []);
+          : capture.chunks;
 
-      let pcmChunks: PcmChunk[] = capture.chunks;
-      if (pcmChunks.length === 0 && wireChunks.length > 0) {
-        pcmChunks = await decodeWireChunksToPcm(
-          sessionId,
-          wireChunks.map((w) => ({ seq: w.seq, pcmBase64: w.payloadBase64 })),
-          wireChunks[0]?.codec
-        );
-      }
-
-      if (displayName && pcmChunks.length > 0) {
+      if (displayName && outboundChunks.length > 0) {
         await recordOutboundMessage({
           sessionId,
           senderName: displayName,
           sampleRate: capture.sampleRate,
           chunkCount: capture.chunksSent,
-          chunks: pcmChunks,
+          chunks: outboundChunks,
           durationMs: capture.durationMs,
         });
         invalidateInbox();
       }
 
-      // Batch resend only when not live-streamed (PCM batch mode after stop).
-      if (capture.chunks.length > 0) {
-        for (const chunk of capture.chunks) {
-          const wire = pcmToWireChunk(chunk.seq, base64ToBytes(chunk.pcmBase64));
-          wsRef.current.sendAudioChunk(sessionId, chunk.seq, wire.payloadBase64, wire.codec);
-        }
+      for (const chunk of capture.chunks) {
+        wsRef.current.sendAudioChunk(sessionId, chunk.seq, chunk.pcmBase64);
       }
       telemetry.session("sender", sessionId, {
         chunksSent: capture.chunksSent,

@@ -8,7 +8,6 @@ import {
   StoredMessage,
 } from "./types";
 import { mergeInboxWithServer } from "./mergeHistory";
-import { decodeWireChunksToPcm } from "../../services/audio/opusCodec";
 import {
   advanceReceiveSince,
   getJoinReceiveSince,
@@ -128,17 +127,8 @@ export async function syncInboxFromServer(
   serverMessages: ServerHistoryEntry[],
   selfName?: string
 ): Promise<StoredMessage[]> {
-  const decoded: ServerHistoryEntry[] = await Promise.all(
-    serverMessages.map(async (entry) => {
-      if (entry.codec !== "opus") return entry;
-      return {
-        ...entry,
-        chunks: await decodeWireChunksToPcm(entry.sessionId, entry.chunks, entry.codec),
-      };
-    })
-  );
   const local = await loadInbox();
-  const merged = mergeInboxWithServer(local, decoded, selfName);
+  const merged = mergeInboxWithServer(local, serverMessages, selfName);
   const saved = await saveInbox(merged);
   if (serverMessages.length > 0) {
     await acknowledgeChannelMessages(serverMessages.map((entry) => entry.completedAt));

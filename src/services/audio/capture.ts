@@ -11,23 +11,12 @@ import {
 import { AUDIO_SAMPLE_RATE } from "../../config";
 import { telemetry } from "../../lib/observability";
 import {
-  base64ToBytes,
   bytesToBase64,
   measurePcmPeak,
   pcmDurationMs,
   PcmChunk,
   splitPcmIntoChunks,
 } from "./pcmUtils";
-import { pcmToWireChunk, useNativeOpusCapture } from "./opusCodec";
-import {
-  isNativeOpusCaptureActive,
-  startNativeOpusCapture,
-  stopNativeOpusCapture,
-} from "./nativeOpusCapture";
-import type { WireChunk } from "./wireChunk";
-
-export type { WireChunk };
-export type WireChunkEmitter = (chunk: WireChunk) => void;
 
 export const WALKIE_RECORDING_AUDIO_MODE = {
   allowsRecording: true,
@@ -37,7 +26,7 @@ export const WALKIE_RECORDING_AUDIO_MODE = {
 };
 
 export interface CaptureResult {
-  /** Remaining PCM chunks when batch mode (no live emitter). Empty when streaming. */
+  /** Remaining chunks when batch mode (no live emitter). Empty when streaming. */
   chunks: PcmChunk[];
   /** Total seq-numbered chunks emitted (live + tail). Use for ptt_end chunkCount. */
   chunksSent: number;
@@ -46,8 +35,6 @@ export interface CaptureResult {
   bufferCount: number;
   peakAmplitude: number;
   durationMs: number;
-  /** Wire payloads when using native Opus capture. */
-  wireChunks?: WireChunk[];
 }
 
 export type ChunkEmitter = (chunk: PcmChunk) => void;
@@ -79,7 +66,7 @@ export function waitForCaptureIdle(): Promise<void> {
 }
 
 export function isCaptureActive(): boolean {
-  return stream !== null || isNativeOpusCaptureActive();
+  return stream !== null;
 }
 
 async function stopStreamInternal(): Promise<void> {
@@ -138,22 +125,14 @@ function flushPendingTail(sampleRate: number): PcmChunk[] {
   return [chunk];
 }
 
-export async function startCapture(sessionId?: string, onWire?: WireChunkEmitter): Promise<void> {
-  if (useNativeOpusCapture()) {
-    return withCaptureLock(() => startNativeOpusCapture(sessionId, onWire));
-  }
-
+export async function startCapture(sessionId?: string, onChunk?: ChunkEmitter): Promise<void> {
   return withCaptureLock(async () => {
     await stopStreamInternal();
     pcmParts = [];
     pendingPcm = new Uint8Array(0);
     nextSeq = 0;
     chunksEmitted = 0;
-    chunkEmitter = onWire
-      ? (pcm) => {
-          onWire(pcmToWireChunk(pcm.seq, base64ToBytes(pcm.pcmBase64)));
-        }
-      : null;
+    chunkEmitter = onChunk ?? null;
     buffersReceived = 0;
     captureStartedAt = Date.now();
 
@@ -195,7 +174,6 @@ export async function startCapture(sessionId?: string, onWire?: WireChunkEmitter
         requestedSampleRate: AUDIO_SAMPLE_RATE,
         actualSampleRate: activeSampleRate,
         rateMismatch: activeSampleRate !== AUDIO_SAMPLE_RATE,
-        nativeOpus: false,
       },
     });
 
@@ -210,10 +188,6 @@ export async function startCapture(sessionId?: string, onWire?: WireChunkEmitter
 }
 
 export async function stopCapture(sessionId?: string): Promise<CaptureResult> {
-  if (useNativeOpusCapture() || isNativeOpusCaptureActive()) {
-    return withCaptureLock(() => stopNativeOpusCapture(sessionId));
-  }
-
   return withCaptureLock(async () => {
     const parts = pcmParts;
     const bufferCount = buffersReceived;
