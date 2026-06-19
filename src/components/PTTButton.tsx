@@ -20,17 +20,26 @@ interface Props {
    * The button shows an amber "WILL QUEUE" state to communicate this.
    */
   willQueue?: boolean;
+  /** Outbound message still being finalized or waiting for server ack. */
+  isSending?: boolean;
   disabled?: boolean;
 }
 
-export function PTTButton({ onPressIn, onPressOut, isTalking, willQueue, disabled }: Props) {
+export function PTTButton({
+  onPressIn,
+  onPressOut,
+  isTalking,
+  willQueue,
+  isSending,
+  disabled,
+}: Props) {
   const pulseAnim = useRef(new Animated.Value(1)).current;
   const ringAnim = useRef(new Animated.Value(0.85)).current;
   const pulseLoop = useRef<Animated.CompositeAnimation | null>(null);
   const ringLoop = useRef<Animated.CompositeAnimation | null>(null);
 
   useEffect(() => {
-    if (isTalking) {
+    if (isTalking || isSending) {
       pulseLoop.current = Animated.loop(
         Animated.sequence([
           Animated.timing(pulseAnim, { toValue: 1.06, duration: 500, useNativeDriver: true }),
@@ -53,19 +62,41 @@ export function PTTButton({ onPressIn, onPressOut, isTalking, willQueue, disable
         Animated.timing(ringAnim, { toValue: 0.85, duration: 200, useNativeDriver: true }),
       ]).start();
     }
-  }, [isTalking, pulseAnim, ringAnim]);
+  }, [isTalking, isSending, pulseAnim, ringAnim]);
+
+  const isLocked = Boolean(disabled || isSending);
 
   const buttonColor = isTalking
     ? colors.transmit
-    : willQueue
-      ? colors.warning
-      : colors.primary;
+    : isSending
+      ? colors.text.muted
+      : willQueue
+        ? colors.warning
+        : colors.primary;
 
   const ringColor = isTalking
     ? colors.transmitMuted
-    : willQueue
-      ? colors.warningMuted
-      : colors.primaryMuted;
+    : isSending
+      ? colors.surfaceMuted
+      : willQueue
+        ? colors.warningMuted
+        : colors.primaryMuted;
+
+  const label = isTalking
+    ? "TALKING"
+    : isSending
+      ? "SENDING"
+      : willQueue
+        ? "WILL QUEUE"
+        : "PUSH TO TALK";
+
+  const hint = isTalking
+    ? "Release to send"
+    : isSending
+      ? "Wait until delivered"
+      : willQueue
+        ? "Sends when online"
+        : "Hold to speak";
 
   return (
     <View style={styles.container}>
@@ -75,7 +106,7 @@ export function PTTButton({ onPressIn, onPressOut, isTalking, willQueue, disable
           {
             backgroundColor: ringColor,
             transform: [{ scale: ringAnim }],
-            opacity: isTalking ? 0.9 : 0.55,
+            opacity: isTalking || isSending ? 0.9 : 0.55,
           },
         ]}
       />
@@ -83,23 +114,19 @@ export function PTTButton({ onPressIn, onPressOut, isTalking, willQueue, disable
         <Pressable
           onPressIn={onPressIn}
           onPressOut={onPressOut}
-          disabled={disabled}
+          disabled={isLocked}
           style={({ pressed }) => [
             styles.button,
             { backgroundColor: buttonColor },
-            pressed && styles.buttonPressed,
-            disabled && styles.buttonDisabled,
+            pressed && !isLocked && styles.buttonPressed,
+            isLocked && styles.buttonDisabled,
           ]}
         >
           <View style={styles.iconCircle}>
             <MicIcon size={28} color={colors.text.inverse} />
           </View>
-          <Text style={styles.label}>
-            {isTalking ? "TALKING" : willQueue ? "WILL QUEUE" : "PUSH TO TALK"}
-          </Text>
-          <Text style={styles.hint}>
-            {isTalking ? "Release to send" : willQueue ? "Sent when reconnected" : "Hold to speak"}
-          </Text>
+          <Text style={styles.label}>{label}</Text>
+          <Text style={styles.hint}>{hint}</Text>
         </Pressable>
       </Animated.View>
     </View>

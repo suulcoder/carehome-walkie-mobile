@@ -19,6 +19,7 @@ import {
   markSessionEnded,
   removeSession,
   getPendingSessions,
+  saveSession,
 } from "../../lib/queue/outboundQueue";
 import { getReceiveSince } from "../../features/inbox/inboxRepository";
 import { registerOwnedSession } from "../audio/playback";
@@ -59,6 +60,7 @@ export class WsClient {
     if (this.destroyed) return;
     telemetry.info("ws", "connecting", { data: { url: WS_URL, env: WS_ENV } });
     this.setState("connecting");
+    void this.hydrateQueueFromStorage();
     this.openSocket();
   }
 
@@ -141,7 +143,7 @@ export class WsClient {
           sessionId: msg.sessionId,
           data: { lastSeq: msg.lastSeq },
         });
-        this.handleAck(msg.sessionId);
+        this.handleAck(msg.sessionId, msg.lastSeq);
         return;
       }
 
@@ -167,6 +169,7 @@ export class WsClient {
     const wasConnected = this.state === "connected";
     if (wasConnected) telemetry.metric("wsReconnects");
     this.setState(wasConnected ? "reconnecting" : "connecting");
+    void this.hydrateQueueFromStorage();
     telemetry.info("ws", "reconnect_scheduled", { data: { delayMs: this.retryDelay } });
     this.scheduleRetry();
   }
@@ -205,7 +208,7 @@ export class WsClient {
 
   private setState(state: ConnectionState): void {
     this.state = state;
-    this.callbacks.onStateChange(state, this.activeSessions.size);
+    this.callbacks.onStateChange(state, this.countPendingSessions());
   }
 
   private send(msg: ClientMessage): void {
@@ -223,10 +226,12 @@ export class WsClient {
     registerOwnedSession(sessionId);
     const session: QueuedSession = { sessionId, chunks: [], ended: false };
     this.activeSessions.set(sessionId, session);
+    void saveSession(session);
     telemetry.metric("pttSessionsStarted");
     telemetry.session("sender", sessionId, { status: "active" });
     telemetry.info("ws", "ptt_start_sent", { sessionId });
     this.send({ type: "ptt_start", sessionId });
+    this.callbacks.onStateChange(this.state, this.countPendingSessions());
   }
 
   sendAudioChunk(sessionId: string, seq: number, pcmBase64: string): void {
@@ -264,20 +269,47 @@ export class WsClient {
     });
     telemetry.session("sender", sessionId, { chunksSent: chunks, sampleRate });
     this.send({ type: "ptt_end", sessionId, sampleRate, chunkCount: chunks });
-
-    if (this.state === "connected") {
-      this.ackedSessions.add(sessionId);
-      this.activeSessions.delete(sessionId);
-      removeSession(sessionId);
-      this.callbacks.onStateChange(this.state, this.activeSessions.size);
-    }
+    this.callbacks.onStateChange(this.state, this.countPendingSessions());
   }
 
-  private handleAck(sessionId: string): void {
+  /** Only drop a session after the server acks ptt_end (lastSeq === -1). */
+  private handleAck(sessionId: string, lastSeq: number): void {
+    if (lastSeq !== -1) return;
+    if (this.ackedSessions.has(sessionId)) return;
+
     this.ackedSessions.add(sessionId);
     this.activeSessions.delete(sessionId);
-    removeSession(sessionId);
-    this.callbacks.onStateChange(this.state, this.activeSessions.size);
+    void removeSession(sessionId);
+    this.callbacks.onStateChange(this.state, this.countPendingSessions());
+  }
+
+  /** Merge persisted sessions into memory so disconnect never drops the queue. */
+  private async hydrateQueueFromStorage(): Promise<void> {
+    const persisted = await getPendingSessions();
+    for (const stored of persisted) {
+      const existing = this.activeSessions.get(stored.sessionId);
+      if (!existing) {
+        this.activeSessions.set(stored.sessionId, stored);
+        continue;
+      }
+      if (stored.chunks.length > existing.chunks.length) {
+        existing.chunks = stored.chunks;
+      }
+      if (stored.ended) {
+        existing.ended = true;
+        existing.sampleRate = stored.sampleRate ?? existing.sampleRate;
+        existing.chunkCount = stored.chunkCount ?? existing.chunkCount;
+      }
+    }
+    this.callbacks.onStateChange(this.state, this.countPendingSessions());
+  }
+
+  private countPendingSessions(): number {
+    let count = 0;
+    for (const session of this.activeSessions.values()) {
+      if (session.ended && !this.ackedSessions.has(session.sessionId)) count += 1;
+    }
+    return count;
   }
 
   private sendPttEndForQueued(session: QueuedSession): void {
@@ -290,42 +322,28 @@ export class WsClient {
   }
 
   private async drainQueue(): Promise<void> {
+    await this.hydrateQueueFromStorage();
+
     for (const [, session] of this.activeSessions) {
-      if (session.ended) {
-        telemetry.info("ws", "drain_session", {
+      if (!session.ended || this.ackedSessions.has(session.sessionId)) continue;
+
+      telemetry.info("ws", "drain_session", {
+        sessionId: session.sessionId,
+        data: { chunks: session.chunks.length, chunkCount: session.chunkCount },
+      });
+      this.send({ type: "ptt_start", sessionId: session.sessionId });
+      for (const chunk of session.chunks) {
+        this.send({
+          type: "audio_chunk",
           sessionId: session.sessionId,
-          data: { chunks: session.chunks.length, chunkCount: session.chunkCount },
+          seq: chunk.seq,
+          pcmBase64: chunk.pcmBase64,
         });
-        this.send({ type: "ptt_start", sessionId: session.sessionId });
-        for (const chunk of session.chunks) {
-          this.send({
-            type: "audio_chunk",
-            sessionId: session.sessionId,
-            seq: chunk.seq,
-            pcmBase64: chunk.pcmBase64,
-          });
-        }
-        this.sendPttEndForQueued(session);
       }
+      this.sendPttEndForQueued(session);
     }
 
-    const persisted = await getPendingSessions();
-    for (const session of persisted) {
-      if (this.activeSessions.has(session.sessionId)) continue;
-      if (session.ended) {
-        this.send({ type: "ptt_start", sessionId: session.sessionId });
-        for (const chunk of session.chunks) {
-          this.send({
-            type: "audio_chunk",
-            sessionId: session.sessionId,
-            seq: chunk.seq,
-            pcmBase64: chunk.pcmBase64,
-          });
-        }
-        this.sendPttEndForQueued(session);
-        removeSession(session.sessionId);
-      }
-    }
+    this.callbacks.onStateChange(this.state, this.countPendingSessions());
   }
 
   getState(): ConnectionState {

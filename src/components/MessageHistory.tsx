@@ -29,6 +29,11 @@ function displaySenderName(message: StoredMessage): string {
   return message.isOutbound ? "You" : message.fromName;
 }
 
+function playStatusLabel(message: StoredMessage): string {
+  if (message.isOutbound) return "Sent";
+  return message.playedAt == null ? "Unplayed" : "Played";
+}
+
 function MessageRow({
   message,
   onReplay,
@@ -68,16 +73,17 @@ function MessageRow({
             <Text style={styles.duration}>{formatDuration(message.durationMs)}</Text>
           </View>
         </View>
-        <Text style={styles.meta}>
-          {formatWhen(message.completedAt)}
-          {message.isOutbound
-            ? " · Sent"
-            : unplayed
-              ? " · New"
-              : message.lastReplayedAt
-                ? " · Replay available"
-                : ""}
-        </Text>
+        <View style={styles.metaRow}>
+          <Text style={styles.meta}>{formatWhen(message.completedAt)}</Text>
+          <Text
+            style={[
+              styles.playStatus,
+              unplayed && !message.isOutbound && styles.playStatusUnplayed,
+            ]}
+          >
+            {playStatusLabel(message)}
+          </Text>
+        </View>
       </View>
 
       <View style={styles.playButton}>
@@ -289,11 +295,24 @@ const styles = StyleSheet.create({
     color: colors.text.secondary,
     fontSize: 11,
   },
-  meta: {
+  metaRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: spacing.sm,
     marginTop: 2,
+  },
+  meta: {
     fontSize: 12,
     color: colors.text.muted,
     lineHeight: 16,
+  },
+  playStatus: {
+    ...typography.label,
+    fontSize: 11,
+    color: colors.text.muted,
+  },
+  playStatusUnplayed: {
+    color: colors.primaryDark,
   },
   playButton: {
     width: 32,

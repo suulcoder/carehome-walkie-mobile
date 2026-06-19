@@ -30,6 +30,11 @@ async function persistSession(session: QueuedSession): Promise<void> {
   }
 }
 
+/** Persist session metadata/chunks — survives disconnect and app restarts. */
+export async function saveSession(session: QueuedSession): Promise<void> {
+  await persistSession(session);
+}
+
 export async function enqueueChunk(session: QueuedSession): Promise<void> {
   await persistSession(session);
 }

@@ -36,7 +36,7 @@ import { PTTButton } from "../components/PTTButton";
 import { PeerList } from "../components/PeerList";
 import { MessageHistory } from "../components/MessageHistory";
 import { colors, radii, shadows, spacing, typography } from "../theme";
-import { SHOW_DEBUG_TELEMETRY } from "../config";
+import { PTT_TAIL_RECORD_MS, SHOW_DEBUG_TELEMETRY } from "../config";
 import {
   recordOutboundMessage,
   loadInbox,
@@ -88,12 +88,15 @@ export function WalkieScreen() {
   const [queuedCount, setQueuedCount] = useState(0);
   const [peers, setPeers] = useState<PeerInfo[]>([]);
   const [isTalking, setIsTalking] = useState(false);
+  const [isFinalizingPtt, setIsFinalizingPtt] = useState(false);
   const [activeSpeaker, setActiveSpeaker] = useState<string | null>(null);
 
   const wsRef = useRef<WsClient | null>(null);
   const activePttSession = useRef<string | null>(null);
   const outboundChunksRef = useRef<PcmChunk[]>([]);
   const isTalkingRef = useRef(false);
+  const pttEndingRef = useRef(false);
+  const queuedCountRef = useRef(0);
   const ignoredReplaySessionsRef = useRef<Set<string>>(new Set());
   const { show: showToast, ToastView } = useToast();
   const { applyServerHistory } = useInboxSync(displayName);
@@ -101,6 +104,12 @@ export function WalkieScreen() {
   useEffect(() => {
     applyServerHistoryRef.current = applyServerHistory;
   }, [applyServerHistory]);
+
+  useEffect(() => {
+    queuedCountRef.current = queuedCount;
+  }, [queuedCount]);
+
+  const isOutboundBusy = isFinalizingPtt || queuedCount > 0;
 
   useEffect(() => {
     setSelfDisplayName(displayName);
@@ -332,7 +341,14 @@ export function WalkieScreen() {
 
   // ─── PTT ───────────────────────────────────────────────────────────────────
   const handlePttIn = async () => {
-    if (isTalkingRef.current || !wsRef.current) return;
+    if (
+      isTalkingRef.current ||
+      pttEndingRef.current ||
+      queuedCountRef.current > 0 ||
+      !wsRef.current
+    ) {
+      return;
+    }
 
     isTalkingRef.current = true;
     ReactNativeHapticFeedback.trigger("impactMedium", { enableVibrateFallback: true });
@@ -362,62 +378,75 @@ export function WalkieScreen() {
   };
 
   const handlePttOut = async () => {
-    if (!isTalkingRef.current) return;
+    if (!isTalkingRef.current || pttEndingRef.current) return;
 
+    pttEndingRef.current = true;
+    setIsFinalizingPtt(true);
     ReactNativeHapticFeedback.trigger("impactLight", { enableVibrateFallback: true });
+    setIsTalking(false);
 
     const sessionId = activePttSession.current;
-    const capture = await stopCapture(sessionId ?? undefined);
 
-    isTalkingRef.current = false;
-    setIsTalking(false);
-    activePttSession.current = null;
+    try {
+      if (PTT_TAIL_RECORD_MS > 0) {
+        await new Promise((resolve) => setTimeout(resolve, PTT_TAIL_RECORD_MS));
+      }
 
-    if (!sessionId || !wsRef.current) return;
+      if (activePttSession.current !== sessionId) return;
 
-    if (capture.chunksSent === 0) {
-      telemetry.warn("ptt", "no_audio_to_send", {
-        sessionId,
-        data: {
+      const capture = await stopCapture(sessionId ?? undefined);
+
+      if (!sessionId || !wsRef.current) return;
+
+      if (capture.chunksSent === 0) {
+        telemetry.warn("ptt", "no_audio_to_send", {
+          sessionId,
+          data: {
+            pcmBytes: capture.pcmBytes,
+            peakAmplitude: capture.peakAmplitude,
+            bufferCount: capture.bufferCount,
+          },
+          message: "PTT ended with no audio — emulator mic issue or hold too short",
+        });
+        showToast("No audio captured — hold longer or check mic");
+      } else {
+        const outboundChunks =
+          outboundChunksRef.current.length > 0
+            ? outboundChunksRef.current
+            : capture.chunks;
+
+        if (displayName && outboundChunks.length > 0) {
+          await recordOutboundMessage({
+            sessionId,
+            senderName: displayName,
+            sampleRate: capture.sampleRate,
+            chunkCount: capture.chunksSent,
+            chunks: outboundChunks,
+            durationMs: capture.durationMs,
+          });
+          invalidateInbox();
+        }
+
+        for (const chunk of capture.chunks) {
+          wsRef.current.sendAudioChunk(sessionId, chunk.seq, chunk.pcmBase64);
+        }
+        telemetry.session("sender", sessionId, {
+          chunksSent: capture.chunksSent,
           pcmBytes: capture.pcmBytes,
           peakAmplitude: capture.peakAmplitude,
-          bufferCount: capture.bufferCount,
-        },
-        message: "PTT ended with no audio — emulator mic issue or hold too short",
-      });
-      showToast("No audio captured — hold longer or check mic");
-    } else {
-      const outboundChunks =
-        outboundChunksRef.current.length > 0
-          ? outboundChunksRef.current
-          : capture.chunks;
-
-      if (displayName && outboundChunks.length > 0) {
-        await recordOutboundMessage({
-          sessionId,
-          senderName: displayName,
-          sampleRate: capture.sampleRate,
-          chunkCount: capture.chunksSent,
-          chunks: outboundChunks,
           durationMs: capture.durationMs,
+          sampleRate: capture.sampleRate,
         });
-        invalidateInbox();
       }
 
-      for (const chunk of capture.chunks) {
-        wsRef.current.sendAudioChunk(sessionId, chunk.seq, chunk.pcmBase64);
-      }
-      telemetry.session("sender", sessionId, {
-        chunksSent: capture.chunksSent,
-        pcmBytes: capture.pcmBytes,
-        peakAmplitude: capture.peakAmplitude,
-        durationMs: capture.durationMs,
-        sampleRate: capture.sampleRate,
-      });
+      wsRef.current.sendPttEnd(sessionId, capture.sampleRate, capture.chunksSent);
+      outboundChunksRef.current = [];
+    } finally {
+      isTalkingRef.current = false;
+      pttEndingRef.current = false;
+      setIsFinalizingPtt(false);
+      activePttSession.current = null;
     }
-
-    wsRef.current.sendPttEnd(sessionId, capture.sampleRate, capture.chunksSent);
-    outboundChunksRef.current = [];
   };
 
   // ─── Render ─────────────────────────────────────────────────────────────────
@@ -453,14 +482,14 @@ export function WalkieScreen() {
       </View>
 
       <View style={styles.pttArea}>
-        {/* PTT is always enabled. When disconnected the session is persisted to
-            AsyncStorage and replayed automatically once the connection is restored,
-            satisfying the "never quietly loses what someone said" requirement. */}
+        {/* PTT unlocks only after the server acks the outbound message (queuedCount === 0).
+            While disconnected, the session is persisted and replayed on reconnect. */}
         <PTTButton
           onPressIn={handlePttIn}
           onPressOut={handlePttOut}
           isTalking={isTalking}
-          willQueue={connState === "disconnected"}
+          isSending={isOutboundBusy}
+          willQueue={connState !== "connected"}
         />
       </View>
 
