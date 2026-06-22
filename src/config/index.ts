@@ -29,8 +29,8 @@ export const PTT_TAIL_RECORD_MS = 1_000;
  * Adaptive jitter buffer (VoIP-style playout delay).
  * Good network → near minMs (~300 ms). High jitter → grows toward maxMs (~1.5 s).
  */
-export const JITTER_MIN_PLAYOUT_MS = 500;
-export const JITTER_MAX_PLAYOUT_MS = 10_000;
+export const JITTER_MIN_PLAYOUT_MS = 1_000;
+export const JITTER_MAX_PLAYOUT_MS = 13_000;
 export const JITTER_MARGIN_FACTOR = 20;
 
 /** After ptt_end, if no new chunk arrives for this long, play what was received. Resets on each chunk. */
