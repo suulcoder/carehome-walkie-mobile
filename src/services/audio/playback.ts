@@ -106,6 +106,7 @@ let selfDisplayName: string | null = null;
 const ownedSessionIds = new Set<string>();
 let livePlaybackDepth = 0;
 let playbackSessionActive = false;
+let liveSessionEndedListener: ((fromId: string) => void) | null = null;
 
 export function setSelfDisplayName(name: string | null): void {
   selfDisplayName = name;
@@ -128,6 +129,19 @@ export function setPlaybackWarningHandler(
   handler: ((warning: PlaybackWarning) => void) | null
 ): void {
   warningHandler = handler;
+}
+
+/** Fires when a live incoming session finishes playback (not inbox manual replay). */
+export function setLiveSessionEndedListener(
+  listener: ((fromId: string) => void) | null
+): void {
+  liveSessionEndedListener = listener;
+}
+
+function notifyLiveSessionEnded(fromId: string): void {
+  if (fromId && fromId !== "unknown") {
+    liveSessionEndedListener?.(fromId);
+  }
 }
 
 function emitWarning(warning: PlaybackWarning): void {
@@ -333,8 +347,10 @@ function cleanupSession(sessionId: string, session: ReceiveSession): void {
 }
 
 function finishSession(sessionId: string, session: ReceiveSession, success: boolean, reason?: string): void {
+  const fromId = session.fromId;
   cleanupSession(sessionId, session);
   telemetry.sessionDone(sessionId, success, reason);
+  notifyLiveSessionEnded(fromId);
 }
 
 function schedulePlaybackAttempt(sessionId: string): void {
@@ -1074,11 +1090,26 @@ async function playAudioPayload(input: PlayAudioPayloadInput): Promise<boolean> 
   }
 }
 
-export async function teardownPlayback(): Promise<void> {
-  sessions.forEach(clearSessionTimers);
+/** Drop in-progress live receive sessions (e.g. WS disconnect mid-message). */
+export function abortLiveReceiveSessions(): void {
+  cancelActivePlayback();
+  for (const [sessionId, session] of sessions) {
+    clearSessionTimers(session);
+    telemetry.sessionDone(sessionId, false, "aborted_disconnect");
+  }
   sessions.clear();
-  pendingPlayQueue.length = 0;
+  pendingPlayQueue.splice(
+    0,
+    pendingPlayQueue.length,
+    ...pendingPlayQueue.filter((item) => item.kind === "stored")
+  );
+  drainPromise = null;
   livePlaybackDepth = 0;
   playbackSessionActive = false;
-  cancelActivePlayback();
+  void restoreRecordingSession().catch(() => {});
+}
+
+export async function teardownPlayback(): Promise<void> {
+  abortLiveReceiveSessions();
+  pendingPlayQueue.length = 0;
 }

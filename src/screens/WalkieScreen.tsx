@@ -26,6 +26,8 @@ import {
   setPlaybackWarningHandler,
   setSelfDisplayName,
   registerOwnedSession,
+  abortLiveReceiveSessions,
+  setLiveSessionEndedListener,
 } from "../services/audio/playback";
 import { telemetry } from "../lib/observability";
 import { useAppLifecycle } from "../hooks/useAppLifecycle";
@@ -97,7 +99,6 @@ export function WalkieScreen() {
   const isTalkingRef = useRef(false);
   const pttEndingRef = useRef(false);
   const queuedCountRef = useRef(0);
-  const ignoredReplaySessionsRef = useRef<Set<string>>(new Set());
   const { show: showToast, ToastView } = useToast();
   const { applyServerHistory } = useInboxSync(displayName);
   const applyServerHistoryRef = useRef(applyServerHistory);
@@ -165,6 +166,10 @@ export function WalkieScreen() {
       }
     });
 
+    setLiveSessionEndedListener((fromId) => {
+      setActiveSpeaker((prev) => (prev === fromId ? null : prev));
+    });
+
     requestMicPermission().then((granted) => {
       if (!granted) {
         Alert.alert(
@@ -176,6 +181,7 @@ export function WalkieScreen() {
 
     return () => {
       setPlaybackWarningHandler(null);
+      setLiveSessionEndedListener(null);
     };
   }, [showToast]);
 
@@ -214,6 +220,11 @@ export function WalkieScreen() {
       onStateChange: (state, queued) => {
         setConnState(state);
         setQueuedCount(queued);
+        // WS drop mid-message (e.g. code 1001) — ptt_end never arrives; reset UI + playback.
+        if (state === "reconnecting" || state === "connecting") {
+          setActiveSpeaker(null);
+          abortLiveReceiveSessions();
+        }
       },
       // Indirection via ref — see comment above handleServerMessageRef.
       onMessage: (msg) => handleServerMessageRef.current(msg),
@@ -261,7 +272,7 @@ export function WalkieScreen() {
         case "ptt_start":
           if (isOwnSpeaker(msg.from.name)) break;
           if (msg.replay) {
-            ignoredReplaySessionsRef.current.add(msg.sessionId);
+            beginReceiveSession(msg.sessionId, msg.from);
             break;
           }
           setActiveSpeaker(msg.from.id);
@@ -272,7 +283,6 @@ export function WalkieScreen() {
 
         case "audio_chunk":
           if (isOwnSpeaker(msg.from.name)) break;
-          if (msg.replay || ignoredReplaySessionsRef.current.has(msg.sessionId)) break;
           receiveChunk(msg.sessionId, msg.seq, msg.pcmBase64, msg.from).catch((err) => {
             telemetry.error("playback", "receive_chunk_failed", {
               sessionId: msg.sessionId,
@@ -283,10 +293,6 @@ export function WalkieScreen() {
 
         case "ptt_end":
           if (isOwnSpeaker(msg.from.name)) break;
-          if (msg.replay || ignoredReplaySessionsRef.current.has(msg.sessionId)) {
-            ignoredReplaySessionsRef.current.delete(msg.sessionId);
-            break;
-          }
           endSession(
             msg.sessionId,
             msg.sampleRate,
@@ -299,9 +305,6 @@ export function WalkieScreen() {
               data: { error: err instanceof Error ? err.message : String(err) },
             });
           });
-          if (!msg.replay) {
-            setActiveSpeaker((prev) => (prev === msg.from.id ? null : prev));
-          }
           break;
 
         case "history_sync":
